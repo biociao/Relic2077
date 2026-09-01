@@ -12,11 +12,14 @@
 
 ---
 
-Relic2077 是一个本地优先、Git 原生的智能体经验中枢，让你在推陈出新、争夺用户入口的AI Agent工具的使用过程中延续同一份记忆。它为 Codex、Claude、Cursor、DeepSeek Harness（DSH）以及
-其他兼容 MCP 的 Agent 提供用户完全自有的统一记忆，拒绝将个人知识绑定到任何模型或厂商。
-
-Markdown 是唯一事实来源；SQLite 只是可以随时丢弃并重建的搜索索引。
+Relic2077 是一个本地优先、Git 原生的智能体经验中枢，   
+让你在推陈出新、争夺用户入口的AI Agent工具的使用过程中延续同一份记忆。
+它为 Codex、Claude、Cursor、DeepSeek Harness（DSH）以及其他兼容 MCP 的 Agent 
+提供用户完全自有的统一记忆，拒绝将个人知识绑定到任何模型或厂商。   
+Markdown 是唯一事实来源；SQLite 只是可以随时丢弃并重建的搜索索引。  
 你的知识始终可读、可迁移、可重建，并且永远属于你。
+
+</div>
 
 ## 当前里程碑
 
