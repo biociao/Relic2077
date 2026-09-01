@@ -94,7 +94,68 @@ Relic's MCP server uses standard input/output and never opens a network port:
 ./target/release/relic mcp --vault ~/relic-vault
 ```
 
-Add it to Codex:
+Configure Relic for an agent project and optionally add active memory guidance:
+
+```bash
+relic integrate codex \
+  --vault ~/relic-vault \
+  --project /path/to/project \
+  --update-agents
+```
+
+Replace `codex` with any supported host:
+
+```text
+codex    .codex/config.toml       AGENTS.md
+claude   .mcp.json                CLAUDE.md
+cursor   .cursor/mcp.json         AGENTS.md
+gemini   .gemini/settings.json    GEMINI.md
+vscode   .vscode/mcp.json         AGENTS.md
+dsh      $DSH_HOME/profiles/<profile>/cordis.patch.yml
+         $DSH_HOME/profiles/<profile>/AGENTS.md
+```
+
+Each integration is idempotent, preserves unrelated settings and records the
+correct source agent for new memories. `--update-agents` adds or refreshes only
+Relic's managed instruction block. Use `--dry-run` to preview affected files
+without writing them.
+
+`--project` is optional. When omitted, Relic configures the agent for the current
+user in its global configuration location:
+
+```text
+codex    ~/.codex/config.toml           ~/.codex/AGENTS.md
+claude   ~/.claude.json                 ~/.claude/CLAUDE.md
+cursor   ~/.cursor/mcp.json             User Rules are managed in Cursor settings
+gemini   ~/.gemini/settings.json        ~/.gemini/GEMINI.md
+vscode   ~/.copilot/mcp-config.json     ~/.copilot/copilot-instructions.md
+dsh      $DSH_HOME/cordis.patch.yml       $DSH_HOME/AGENTS.md
+```
+
+Pass `--project /path/to/project` only when the integration should be scoped to
+one project. Cursor does not expose a supported global rules file, so global
+`--update-agents` configures its MCP server only; add the Relic guidance through
+**Cursor Settings > Rules**.
+
+DSH uses host and profile scopes rather than project-local MCP discovery. Pass
+`--profile` to update that profile's MCP patch and instruction file:
+
+```bash
+relic integrate dsh --vault ~/relic-vault --profile tui
+```
+
+Omit `--profile` to update `$DSH_HOME/cordis.patch.yml` and
+`$DSH_HOME/AGENTS.md`, which apply globally across profiles.
+
+DSH currently does not automatically load `AGENTS.md` from a profile directory;
+it loads `$DSH_HOME/AGENTS.md` and instructions from the session workspace. The
+profile file is generated for explicit profile ownership, but omit `--profile`
+when `--update-agents` must affect Agent behavior automatically.
+
+Use `--dsh-home` only when DSH data lives somewhere other than `$DSH_HOME` or
+`~/.dsh`.
+
+To configure Codex manually instead, run:
 
 ```bash
 codex mcp add relic -- \

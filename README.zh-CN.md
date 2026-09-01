@@ -82,7 +82,63 @@ Relic MCP Server 使用标准输入输出，不会开放网络端口：
 ./target/release/relic mcp --vault ~/relic-vault
 ```
 
-添加到 Codex：
+为 Agent 项目配置 Relic，并可选择加入主动使用长期记忆的规则：
+
+```bash
+relic integrate codex \
+  --vault ~/relic-vault \
+  --project /path/to/project \
+  --update-agents
+```
+
+可将 `codex` 替换为任一受支持的宿主：
+
+```text
+codex    .codex/config.toml       AGENTS.md
+claude   .mcp.json                CLAUDE.md
+cursor   .cursor/mcp.json         AGENTS.md
+gemini   .gemini/settings.json    GEMINI.md
+vscode   .vscode/mcp.json         AGENTS.md
+dsh      $DSH_HOME/profiles/<profile>/cordis.patch.yml
+         $DSH_HOME/profiles/<profile>/AGENTS.md
+```
+
+所有集成都可幂等执行，保留无关配置，并为新记忆记录正确的来源 Agent。
+`--update-agents` 只会添加或刷新 Relic 管理的指令区块。可传入 `--dry-run`
+预览将受影响的文件而不实际写入。
+
+`--project` 是可选参数。省略时，Relic 会写入当前用户的 Agent 全局配置：
+
+```text
+codex    ~/.codex/config.toml           ~/.codex/AGENTS.md
+claude   ~/.claude.json                 ~/.claude/CLAUDE.md
+cursor   ~/.cursor/mcp.json             全局 User Rules 需在 Cursor 设置中管理
+gemini   ~/.gemini/settings.json        ~/.gemini/GEMINI.md
+vscode   ~/.copilot/mcp-config.json     ~/.copilot/copilot-instructions.md
+dsh      $DSH_HOME/cordis.patch.yml       $DSH_HOME/AGENTS.md
+```
+
+只有希望集成局限于单个项目时，才传入 `--project /path/to/project`。Cursor
+没有受支持的全局规则文件，因此全局模式下的 `--update-agents` 只配置 MCP；
+Relic 指令需要通过 **Cursor Settings > Rules** 添加。
+
+DSH 使用宿主和 profile 作用域，而不是自动发现项目级 MCP 配置。传入
+`--profile` 时会更新该 profile 的 MCP patch 和指令文件：
+
+```bash
+relic integrate dsh --vault ~/relic-vault --profile tui
+```
+
+省略 `--profile` 时则更新 `$DSH_HOME/cordis.patch.yml` 和
+`$DSH_HOME/AGENTS.md`，作为所有 profile 共用的全局配置。
+
+DSH 当前不会自动加载 profile 目录中的 `AGENTS.md`；它只加载
+`$DSH_HOME/AGENTS.md` 和会话工作区内的指令文件。profile 文件用于明确归属，
+如果希望 `--update-agents` 自动影响 Agent 行为，请省略 `--profile`。
+
+只有当 DSH 数据不位于 `$DSH_HOME` 或 `~/.dsh` 时才需要传入 `--dsh-home`。
+
+如需手动配置 Codex，可以运行：
 
 ```bash
 codex mcp add relic -- \

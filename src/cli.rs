@@ -1,6 +1,6 @@
 use crate::vault::{EntryPatch, Vault};
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::env;
 use std::path::PathBuf;
 
@@ -87,6 +87,11 @@ enum Command {
     Stats,
     /// Check vault health
     Doctor,
+    /// Connect Relic to an agent project
+    Integrate {
+        #[command(subcommand)]
+        agent: Integration,
+    },
     /// Run the Model Context Protocol server over standard input/output
     Mcp {
         /// Relic vault exposed to connected agents
@@ -96,6 +101,57 @@ enum Command {
         #[arg(long, default_value = "mcp-agent")]
         source_agent: String,
     },
+}
+
+#[derive(Subcommand)]
+enum Integration {
+    /// Add Relic MCP configuration for Codex
+    Codex(IntegrationArgs),
+    /// Add Relic MCP configuration for Claude Code
+    Claude(IntegrationArgs),
+    /// Add Relic MCP configuration for Cursor
+    Cursor(IntegrationArgs),
+    /// Add Relic MCP configuration for Gemini CLI
+    Gemini(IntegrationArgs),
+    /// Add Relic MCP configuration for VS Code and Copilot
+    Vscode(IntegrationArgs),
+    /// Add Relic MCP configuration for DeepSeek Harness
+    Dsh(DshIntegrationArgs),
+}
+
+#[derive(Args)]
+struct IntegrationArgs {
+    /// Relic vault exposed to the agent
+    #[arg(long)]
+    vault: PathBuf,
+    /// Agent project to configure; omit for user-global configuration
+    #[arg(long)]
+    project: Option<PathBuf>,
+    /// Add active Relic memory guidance to the agent's instruction file
+    #[arg(long)]
+    update_agents: bool,
+    /// Print the files that would change without writing them
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
+struct DshIntegrationArgs {
+    /// Relic vault exposed to DSH
+    #[arg(long)]
+    vault: PathBuf,
+    /// DSH profile to configure; omit for global DSH configuration
+    #[arg(long)]
+    profile: Option<String>,
+    /// DSH data directory (defaults to DSH_HOME or ~/.dsh)
+    #[arg(long)]
+    dsh_home: Option<PathBuf>,
+    /// Add active Relic guidance to profile or global AGENTS.md
+    #[arg(long)]
+    update_agents: bool,
+    /// Print the files that would change without writing them
+    #[arg(long)]
+    dry_run: bool,
 }
 
 impl Cli {
@@ -210,6 +266,56 @@ impl Cli {
                     entries.len()
                 );
             }
+            Command::Integrate { agent } => {
+                if let Integration::Dsh(args) = &agent {
+                    let dsh_home = args.dsh_home.clone().unwrap_or_else(default_dsh_home);
+                    let outcome = crate::integration::integrate_dsh(
+                        &args.vault,
+                        &env::current_exe()?,
+                        args.profile.as_deref(),
+                        &dsh_home,
+                        args.update_agents,
+                        args.dry_run,
+                    )?;
+                    print_integration_outcome(outcome, args.dry_run);
+                    if args.profile.is_some() && args.update_agents {
+                        eprintln!(
+                            "Note: DSH does not automatically load profile AGENTS.md files; omit \
+                             --profile to update the globally loaded $DSH_HOME/AGENTS.md"
+                        );
+                    }
+                    return Ok(());
+                }
+                let (kind, args) = match agent {
+                    Integration::Codex(args) => (crate::integration::AgentKind::Codex, args),
+                    Integration::Claude(args) => (crate::integration::AgentKind::Claude, args),
+                    Integration::Cursor(args) => (crate::integration::AgentKind::Cursor, args),
+                    Integration::Gemini(args) => (crate::integration::AgentKind::Gemini, args),
+                    Integration::Vscode(args) => (crate::integration::AgentKind::Vscode, args),
+                    Integration::Dsh(_) => unreachable!(),
+                };
+                let executable = env::current_exe()?;
+                let outcome = if let Some(project) = args.project.as_deref() {
+                    crate::integration::integrate(
+                        kind,
+                        project,
+                        &args.vault,
+                        &executable,
+                        args.update_agents,
+                        args.dry_run,
+                    )?
+                } else {
+                    crate::integration::integrate_global(
+                        kind,
+                        &default_home(),
+                        &args.vault,
+                        &executable,
+                        args.update_agents,
+                        args.dry_run,
+                    )?
+                };
+                print_integration_outcome(outcome, args.dry_run);
+            }
             Command::Mcp {
                 vault,
                 source_agent,
@@ -224,4 +330,25 @@ impl Cli {
 
 fn current_vault() -> Result<Vault> {
     Vault::discover(&env::current_dir()?)
+}
+
+fn default_dsh_home() -> PathBuf {
+    env::var_os("DSH_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".dsh")))
+        .unwrap_or_else(|| PathBuf::from(".dsh"))
+}
+
+fn default_home() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn print_integration_outcome(outcome: crate::integration::IntegrationOutcome, dry_run: bool) {
+    let action = if dry_run { "Would update" } else { "Updated" };
+    println!("{action} {}", outcome.config_path.display());
+    if let Some(path) = outcome.agents_path {
+        println!("{action} {}", path.display());
+    }
 }
