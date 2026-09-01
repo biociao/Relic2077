@@ -45,9 +45,8 @@ This repository contains the Phase 0 CLI plus the first MCP integration:
 - expose the vault to Codex, Claude, Cursor, and other agents through a local
   STDIO MCP server.
 
-Git synchronization, confidence evolution, remote MCP transport, and specialized
-agent adapters remain future milestones. The storage format is already compatible
-with them.
+Git synchronization, remote MCP transport, and specialized agent adapters remain
+future milestones. The storage format is already compatible with them.
 
 
 ## Install
@@ -73,11 +72,18 @@ relic add "RAG chunking strategy" \
 relic search "chunking"
 relic update <entry-id> --confidence 0.9 --tags rag,verified
 relic supersede <old-entry-id> <new-entry-id>
-relic list --status active
+relic list --status active --tags rag --min-confidence 0.5
 relic reflect --period weekly
 relic stats
 relic doctor
 ```
+
+`relic list` displays effective confidence. Relic continuously decays the stored
+confidence from `last_verified` using `confidence × e^(-decay_rate × years)`;
+expired entries have an effective confidence of zero. Updating an entry's
+confidence also refreshes `last_verified`. List filters include `--kind`,
+`--status`, `--tags`, `--source-agent`, `--min-confidence`, and
+`--max-confidence`.
 
 ## Connect an agent through MCP
 

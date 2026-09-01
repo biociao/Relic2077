@@ -69,6 +69,18 @@ enum Command {
         kind: Option<String>,
         #[arg(long)]
         status: Option<String>,
+        /// Require every comma-separated tag
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        /// Filter by the agent that originally supplied the entry
+        #[arg(long)]
+        source_agent: Option<String>,
+        /// Minimum effective confidence after decay
+        #[arg(long)]
+        min_confidence: Option<f64>,
+        /// Maximum effective confidence after decay
+        #[arg(long)]
+        max_confidence: Option<f64>,
     },
     /// Full-text search the vault
     Search {
@@ -215,14 +227,31 @@ impl Cli {
                 println!("{}\tsuperseded by\t{}", old.meta.id, new.meta.id);
             }
             Command::Get { entry_id } => println!("{}", current_vault()?.get(&entry_id)?.render()?),
-            Command::List { kind, status } => {
+            Command::List {
+                kind,
+                status,
+                tags,
+                source_agent,
+                min_confidence,
+                max_confidence,
+            } => {
                 for entry in current_vault()?.entries()?.into_iter().filter(|entry| {
+                    let confidence = entry.meta.effective_confidence();
                     kind.as_ref().is_none_or(|v| &entry.meta.kind == v)
                         && status.as_ref().is_none_or(|v| &entry.meta.status == v)
+                        && tags.iter().all(|tag| entry.meta.tags.contains(tag))
+                        && source_agent
+                            .as_ref()
+                            .is_none_or(|agent| entry.meta.source_agents.contains(agent))
+                        && min_confidence.is_none_or(|minimum| confidence >= minimum)
+                        && max_confidence.is_none_or(|maximum| confidence <= maximum)
                 }) {
                     println!(
                         "{}\t{:.2}\t{}\t{}",
-                        entry.meta.id, entry.meta.confidence, entry.meta.status, entry.meta.title
+                        entry.meta.id,
+                        entry.meta.effective_confidence(),
+                        entry.meta.status,
+                        entry.meta.title
                     );
                 }
             }
@@ -248,10 +277,14 @@ impl Cli {
                 let avg = if entries.is_empty() {
                     0.0
                 } else {
-                    entries.iter().map(|e| e.meta.confidence).sum::<f64>() / entries.len() as f64
+                    entries
+                        .iter()
+                        .map(|e| e.meta.effective_confidence())
+                        .sum::<f64>()
+                        / entries.len() as f64
                 };
                 println!(
-                    "entries: {}\nactive: {}\naverage confidence: {:.2}",
+                    "entries: {}\nactive: {}\naverage effective confidence: {:.2}",
                     entries.len(),
                     active,
                     avg

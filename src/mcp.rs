@@ -206,7 +206,16 @@ fn call_tool(vault: &Vault, params: &Value, default_source_agent: &str) -> Resul
                     .sum::<f64>()
                     / entries.len() as f64
             };
-            json!({ "entries": entries.len(), "active": active, "fading": fading, "average_confidence": average_confidence })
+            let average_effective_confidence = if entries.is_empty() {
+                0.0
+            } else {
+                entries
+                    .iter()
+                    .map(|entry| entry.meta.effective_confidence())
+                    .sum::<f64>()
+                    / entries.len() as f64
+            };
+            json!({ "entries": entries.len(), "active": active, "fading": fading, "average_confidence": average_confidence, "average_effective_confidence": average_effective_confidence })
         }
         _ => anyhow::bail!("unknown tool '{name}'"),
     };

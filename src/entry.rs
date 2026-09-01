@@ -34,6 +34,27 @@ fn default_decay_rate() -> f64 {
     0.05
 }
 
+const DAYS_PER_YEAR: f64 = 365.25;
+
+impl EntryMeta {
+    /// Confidence after continuous annual decay from the last verification.
+    pub fn effective_confidence_at(&self, now: DateTime<Utc>) -> f64 {
+        if self.expires.is_some_and(|expires| expires <= now) {
+            return 0.0;
+        }
+        let elapsed_seconds = now
+            .signed_duration_since(self.last_verified)
+            .num_seconds()
+            .max(0) as f64;
+        let elapsed_years = elapsed_seconds / (DAYS_PER_YEAR * 24.0 * 60.0 * 60.0);
+        (self.confidence * (-self.decay_rate * elapsed_years).exp()).clamp(0.0, 1.0)
+    }
+
+    pub fn effective_confidence(&self) -> f64 {
+        self.effective_confidence_at(Utc::now())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Entry {
     pub meta: EntryMeta,

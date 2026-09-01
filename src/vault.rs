@@ -175,6 +175,7 @@ impl Vault {
                 bail!("confidence must be between 0 and 1");
             }
             entry.meta.confidence = confidence;
+            entry.meta.last_verified = Utc::now();
         }
         if let Some(tags) = patch.tags {
             entry.meta.tags = tags;
