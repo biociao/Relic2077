@@ -19,6 +19,7 @@ pub struct EntryPatch {
     pub links: Option<Vec<String>>,
 }
 
+#[derive(Clone)]
 pub struct Vault {
     pub root: PathBuf,
 }

@@ -94,11 +94,41 @@ cargo build --release
 ./target/release/relic init ~/relic-vault
 ```
 
-Relic's MCP server uses standard input/output and never opens a network port:
+Relic's default MCP server uses standard input/output and never opens a network
+port:
 
 ```bash
 ./target/release/relic mcp --vault ~/relic-vault
 ```
+
+For clients that support Streamable HTTP, start the stateless JSON transport:
+
+```bash
+./target/release/relic mcp-http --vault ~/relic-vault
+```
+
+It listens only on `http://127.0.0.1:7337/mcp` by default. A quick protocol test:
+
+```bash
+curl http://127.0.0.1:7337/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+```
+
+Non-loopback binding requires Bearer authentication. Supply the secret through
+an environment variable rather than a command-line value:
+
+```bash
+export RELIC_MCP_TOKEN='replace-with-a-long-random-token'
+relic mcp-http --vault ~/relic-vault --bind 0.0.0.0:7337 \
+  --bearer-token-env RELIC_MCP_TOKEN \
+  --allow-origin https://agent.example.com
+```
+
+This first HTTP implementation returns one JSON response per POST and returns
+HTTP 202 for notifications. It does not yet provide SSE streams, sessions, or
+OAuth discovery.
 
 Configure Relic for an agent project and optionally add active memory guidance:
 
@@ -304,8 +334,8 @@ AGENTS.md         instructions for any agent entering the vault
 
 ## Roadmap
 
-- **0.2:** update/supersede CLI commands, decay calculation, richer filters
-- **0.3:** streamable HTTP MCP transport and optional authentication
+- **0.2 (complete):** update/supersede CLI commands, decay calculation, richer filters
+- **0.3 (in progress):** Streamable HTTP JSON transport and optional Bearer authentication; SSE, sessions, and OAuth remain
 - **0.4:** Git synchronization and conflict resolution
 - **0.5:** reflection triggers, contradiction detection, and pattern extraction
 - **1.0:** stable storage schema, adapters, daemon, and multi-device workflow

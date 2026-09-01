@@ -2,6 +2,7 @@ use crate::vault::{EntryPatch, Vault};
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use std::env;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -112,6 +113,24 @@ enum Command {
         /// Agent name recorded when a client does not supply source_agent
         #[arg(long, default_value = "mcp-agent")]
         source_agent: String,
+    },
+    /// Run the MCP server over Streamable HTTP
+    McpHttp {
+        /// Relic vault exposed to connected agents
+        #[arg(long)]
+        vault: PathBuf,
+        /// Address to listen on
+        #[arg(long, default_value = "127.0.0.1:7337")]
+        bind: SocketAddr,
+        /// Agent name recorded when a client does not supply source_agent
+        #[arg(long, default_value = "http-agent")]
+        source_agent: String,
+        /// Environment variable containing the required Bearer token
+        #[arg(long)]
+        bearer_token_env: Option<String>,
+        /// Additional accepted browser Origin values
+        #[arg(long)]
+        allow_origin: Vec<String>,
     },
 }
 
@@ -355,6 +374,31 @@ impl Cli {
             } => {
                 let vault = Vault::discover(&vault.canonicalize().unwrap_or(vault))?;
                 crate::mcp::serve_with_source_agent(vault, &source_agent)?;
+            }
+            Command::McpHttp {
+                vault,
+                bind,
+                source_agent,
+                bearer_token_env,
+                allow_origin,
+            } => {
+                let vault = Vault::discover(&vault.canonicalize().unwrap_or(vault))?;
+                let bearer_token = bearer_token_env
+                    .as_deref()
+                    .map(|name| {
+                        env::var(name)
+                            .map_err(anyhow::Error::from)
+                            .and_then(|value| {
+                                if value.trim().is_empty() {
+                                    anyhow::bail!(
+                                        "Bearer token environment variable '{name}' is empty"
+                                    )
+                                }
+                                Ok(value)
+                            })
+                    })
+                    .transpose()?;
+                crate::mcp::serve_http(vault, bind, &source_agent, bearer_token, allow_origin)?;
             }
         }
         Ok(())

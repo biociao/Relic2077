@@ -1,10 +1,172 @@
 use crate::vault::{EntryPatch, Vault};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use axum::Router;
+use axum::body::{Body, Bytes};
+use axum::extract::State;
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, ORIGIN, WWW_AUTHENTICATE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const INSTRUCTIONS: &str = "Relic is the user's local-first knowledge vault. Search before creating to avoid duplicates. Preserve entry IDs and history. Use confidence honestly. Prefer superseding obsolete knowledge over deleting it. Read tools are safe; write tools change Markdown files in the configured local vault.";
+
+#[derive(Clone)]
+struct HttpState {
+    vault: Arc<Mutex<Vault>>,
+    source_agent: Arc<str>,
+    bearer_token: Option<Arc<str>>,
+    allowed_origins: Arc<[String]>,
+}
+
+pub fn serve_http(
+    vault: Vault,
+    bind: SocketAddr,
+    source_agent: &str,
+    bearer_token: Option<String>,
+    allowed_origins: Vec<String>,
+) -> Result<()> {
+    if !bind.ip().is_loopback() && bearer_token.is_none() {
+        bail!("refusing to expose MCP beyond localhost without --bearer-token-env");
+    }
+    let app = http_router(
+        vault,
+        bind.port(),
+        source_agent,
+        bearer_token,
+        allowed_origins,
+    );
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(bind).await?;
+        eprintln!("Relic MCP listening on http://{bind}/mcp");
+        axum::serve(listener, app)
+            .await
+            .context("HTTP MCP server failed")
+    })
+}
+
+pub fn http_router(
+    vault: Vault,
+    port: u16,
+    source_agent: &str,
+    bearer_token: Option<String>,
+    mut allowed_origins: Vec<String>,
+) -> Router {
+    allowed_origins.extend([
+        format!("http://localhost:{port}"),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://[::1]:{port}"),
+    ]);
+    allowed_origins.sort();
+    allowed_origins.dedup();
+
+    let state = HttpState {
+        vault: Arc::new(Mutex::new(vault)),
+        source_agent: Arc::from(source_agent),
+        bearer_token: bearer_token.map(Arc::from),
+        allowed_origins: allowed_origins.into(),
+    };
+    Router::new()
+        .route("/mcp", get(http_get).post(http_post))
+        .with_state(state)
+}
+
+async fn http_get() -> StatusCode {
+    StatusCode::METHOD_NOT_ALLOWED
+}
+
+async fn http_post(State(state): State<HttpState>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Err(response) = validate_http_headers(&state, &headers) {
+        return *response;
+    }
+    let request: Value = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                error_response(Value::Null, -32700, &error.to_string()),
+            );
+        }
+    };
+    let response = {
+        let vault = match state.vault.lock() {
+            Ok(vault) => vault,
+            Err(_) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_response(Value::Null, -32603, "vault lock poisoned"),
+                );
+            }
+        };
+        handle_request(&vault, request, &state.source_agent)
+    };
+    match response {
+        Some(response) => json_response(StatusCode::OK, response),
+        None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+fn validate_http_headers(state: &HttpState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+    if let Some(origin) = headers.get(ORIGIN) {
+        let allowed = origin
+            .to_str()
+            .ok()
+            .is_some_and(|origin| state.allowed_origins.iter().any(|item| item == origin));
+        if !allowed {
+            return Err(Box::new(StatusCode::FORBIDDEN.into_response()));
+        }
+    }
+    if let Some(token) = &state.bearer_token {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == format!("Bearer {token}"));
+        if !authorized {
+            let mut response = StatusCode::UNAUTHORIZED.into_response();
+            response.headers_mut().insert(
+                WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer realm=\"relic\""),
+            );
+            return Err(Box::new(response));
+        }
+    }
+    let content_type_is_json = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(';').next() == Some("application/json"));
+    if !content_type_is_json {
+        return Err(Box::new(StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response()));
+    }
+    let accepts_required_types = headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.contains("application/json") && value.contains("text/event-stream")
+        });
+    if !accepts_required_types {
+        return Err(Box::new(StatusCode::NOT_ACCEPTABLE.into_response()));
+    }
+    if let Some(version) = headers.get("mcp-protocol-version")
+        && version != HeaderValue::from_static(PROTOCOL_VERSION)
+    {
+        return Err(Box::new(StatusCode::BAD_REQUEST.into_response()));
+    }
+    Ok(())
+}
+
+fn json_response(status: StatusCode, value: Value) -> Response {
+    let mut response = Response::new(Body::from(value.to_string()));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+}
 
 pub fn serve(vault: Vault) -> Result<()> {
     serve_with_source_agent(vault, "mcp-agent")
