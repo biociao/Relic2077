@@ -3,4 +3,4 @@
 /.relic/state.json
 /.relic/embeddings/
 .DS_Store
-
+/.dsh/
