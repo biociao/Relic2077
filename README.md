@@ -10,6 +10,8 @@
 
 >Secure Your Soul
 
+</div>
+
 ---
 
 Relic2077 is a local-first, Git-native intelligence hub that preserves 

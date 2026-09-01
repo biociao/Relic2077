@@ -10,6 +10,8 @@
 
 > Secure Your Soul
 
+</div>
+
 ---
 
 Relic2077 是一个本地优先、Git 原生的智能体经验中枢，   
