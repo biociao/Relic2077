@@ -12,14 +12,23 @@
 
 ---
 
-Relic2077 is a local-first, Git-native intelligence hub that preserves a single
-continuity of memory as AI agent tools rapidly evolve and compete to become the
-user's primary interface. It gives Codex, Claude, Cursor, DeepSeek Harness (DSH),
-and other MCP-compatible agents a unified memory that is fully owned by the user,
+Relic2077 is a local-first, Git-native intelligence hub that preserves 
+
+a single continuity of memory as AI agent tools rapidly evolve 
+
+and compete to become the user's primary interface. 
+
+It gives Codex, Claude, Cursor, DeepSeek Harness (DSH), and other MCP-compatible agents 
+
+a unified memory that is fully owned by the user,
+
 without locking personal knowledge to any model or vendor.
 
-Markdown is the source of truth; SQLite is only a disposable search index. Your
-knowledge remains readable, portable, rebuildable, and yours.
+Markdown is the source of truth; SQLite is only a disposable search index. 
+
+Your knowledge remains readable, portable, rebuildable, and yours.
+
+</div>
 
 ## Current milestone
 
@@ -37,6 +46,7 @@ This repository contains the Phase 0 CLI plus the first MCP integration:
 Git synchronization, confidence evolution, remote MCP transport, and specialized
 agent adapters remain future milestones. The storage format is already compatible
 with them.
+
 
 ## Install
 
