@@ -1,0 +1,6 @@
+/target/
+/.relic/index.sqlite*
+/.relic/state.json
+/.relic/embeddings/
+.DS_Store
+
