@@ -117,15 +117,31 @@ enum Command {
     Doctor,
     /// Commit, pull, and push the vault with a git remote
     Sync {
-        /// Remote name to push to and pull from
-        #[arg(long, default_value = "origin")]
-        remote: String,
+        /// Remote name to push to and pull from; defaults to the first
+        /// configured sync remote, then "origin"
+        #[arg(long)]
+        remote: Option<String>,
         /// Branch to sync; defaults to the currently checked-out branch
         #[arg(long)]
         branch: Option<String>,
         /// Commit message for local changes
         #[arg(long, default_value = "relic: sync knowledge vault")]
         message: String,
+    },
+    /// Keep the index warm and auto-reflect (maintenance daemon)
+    Watch {
+        /// Work once and exit instead of looping
+        #[arg(long)]
+        once: bool,
+        /// Seconds between maintenance passes in loop mode
+        #[arg(long, default_value_t = 60)]
+        interval: u64,
+        /// Reflection period for auto-reflection
+        #[arg(long, default_value = "weekly")]
+        reflect_period: String,
+        /// Minimum entries required to auto-reflect
+        #[arg(long, default_value_t = 5)]
+        min_entries: usize,
     },
     /// Connect Relic to an agent project
     Integrate {
@@ -394,10 +410,25 @@ impl Cli {
                 let vault = current_vault()?;
                 let entries = vault.entries()?;
                 vault.reindex()?;
+                let config = match vault.config() {
+                    Ok(config) => {
+                        println!(
+                            "config ok (schema {}; {} sync remote(s))",
+                            config.version,
+                            config.sync.remotes.len()
+                        );
+                        Some(config)
+                    }
+                    Err(error) => {
+                        println!("config problem: {error:#}");
+                        None
+                    }
+                };
                 println!(
                     "Vault healthy: {} valid entries; index rebuilt",
                     entries.len()
                 );
+                let _ = config;
             }
             Command::Sync {
                 remote,
@@ -408,6 +439,18 @@ impl Cli {
                 let branch = match branch {
                     Some(branch) => branch,
                     None => crate::git::current_branch(&vault.root)?,
+                };
+                let remote = match remote {
+                    Some(remote) => remote,
+                    None => {
+                        let config = vault.config()?;
+                        if let Some(first) = config.sync.remotes.first() {
+                            crate::git::ensure_remote(&vault.root, &first.name, &first.url)?;
+                            first.name.clone()
+                        } else {
+                            "origin".to_string()
+                        }
+                    }
                 };
                 let outcome = crate::git::sync(&vault.root, &remote, &branch, &message)?;
                 println!(
@@ -425,6 +468,25 @@ impl Cli {
                     }
                 }
                 println!("pushed to {}/{}", outcome.remote, outcome.branch);
+            }
+            Command::Watch {
+                once,
+                interval,
+                reflect_period,
+                min_entries,
+            } => {
+                let vault = current_vault()?;
+                loop {
+                    let maintenance = vault.maintain(&reflect_period, min_entries)?;
+                    println!(
+                        "maintained {} entries (reflected: {})",
+                        maintenance.entries, maintenance.reflected
+                    );
+                    if once {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(interval));
+                }
             }
             Command::Integrate { agent } => {
                 if let Integration::Dsh(args) = &agent {

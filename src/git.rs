@@ -48,6 +48,14 @@ pub fn ensure_repository(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Add a remote by name and URL if it is not already configured.
+pub fn ensure_remote(root: &Path, name: &str, url: &str) -> Result<()> {
+    if git_result(root, &["remote", "get-url", name]).is_err() {
+        git(root, &["remote", "add", name, url])?;
+    }
+    Ok(())
+}
+
 /// The currently checked-out branch name.
 pub fn current_branch(root: &Path) -> Result<String> {
     git(root, &["rev-parse", "--abbrev-ref", "HEAD"])

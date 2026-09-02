@@ -75,9 +75,10 @@ relic supersede <old-entry-id> <new-entry-id>
 relic list --status active --tags rag --min-confidence 0.5
 relic analyze
 relic reflect --period weekly --auto --min-entries 5
+relic watch --once
 relic stats
 relic doctor
-relic sync --remote origin --branch main --message "sync memory"
+relic sync
 ```
 
 `relic list` displays effective confidence. Relic continuously decays the stored
@@ -386,6 +387,38 @@ relic reflect --period daily --auto --min-entries 5
 `--auto` creates the reflection only when it does not already exist for that
 period and the vault holds at least `--min-entries` entries (default 5).
 
+## Configuration and daemon
+
+`.relic/config.yaml` is the stable, validated contract for a vault. `relic
+doctor` checks the schema version and the constraints on every field (bounded
+confidence and decay values, a supported `sync.mode`, and well-formed, unique
+sync remotes). Unknown fields are ignored, so a newer config does not break an
+older binary.
+
+Configure default sync remotes once and `relic sync` then needs no arguments — it
+commits local changes, pulls and merges the first configured remote, and pushes:
+
+```yaml
+sync:
+  mode: manual
+  remotes:
+    - name: origin
+      url: git@github.com:you/relic-vault.git
+```
+
+When `--remote` is omitted, Relic adds the first configured remote if it is not
+already known and syncs it. This is the multi-device workflow: point each device
+at the same vault, configure the same remote, and run `relic sync`.
+
+`relic watch` keeps a vault warm as a maintenance daemon — it rebuilds the search
+index and auto-reflects when the trigger is met:
+
+```bash
+relic watch                 # loop every 60 seconds
+relic watch --once          # run a single maintenance pass and exit
+relic watch --interval 120 --reflect-period daily --min-entries 5
+```
+
 ## Principles
 
 1. **Plain text owns the truth.** The database can always be deleted and rebuilt.
@@ -412,4 +445,4 @@ AGENTS.md         instructions for any agent entering the vault
 - **0.3 (complete):** Streamable HTTP transport (JSON + SSE streaming, batches), optional Bearer authentication, `mcp-session-id` sessions, and OAuth 2.1 discovery metadata
 - **0.4 (complete):** `relic sync` git commit/pull/push with deterministic conflict resolution that preserves local versions
 - **0.5 (complete):** reflection synthesis with automatic `--auto` triggers, contradiction detection, and pattern extraction
-- **1.0:** stable storage schema, adapters, daemon, and multi-device workflow
+- **1.0 (complete):** config schema validation (`relic doctor`), `relic watch` maintenance daemon, and config-driven sync remotes for multi-device workflow

@@ -226,6 +226,28 @@ impl Vault {
         Index::open(&self.root.join(".relic/index.sqlite"))?.search(query, limit)
     }
 
+    /// Load and validate the vault's `.relic/config.yaml`.
+    pub fn config(&self) -> Result<crate::config::Config> {
+        crate::config::Config::load(&self.root)
+    }
+
+    /// Rebuild the index and, if the reflection trigger is met, write a
+    /// reflection draft. This is the workhorse for the `relic watch` daemon.
+    pub fn maintain(&self, period: &str, min_entries: usize) -> Result<Maintenance> {
+        let entries = self.entries()?;
+        self.reindex()?;
+        let reflected = if self.should_reflect(period, min_entries)? {
+            self.create_reflection(period)?;
+            true
+        } else {
+            false
+        };
+        Ok(Maintenance {
+            entries: entries.len(),
+            reflected,
+        })
+    }
+
     pub fn create_reflection(&self, period: &str) -> Result<PathBuf> {
         let now = Utc::now();
         let (folder, filename) = reflection_target(period, now)?;
@@ -314,6 +336,13 @@ impl Vault {
         );
         self.create(&title, &content, "pattern", proposal.members, 0.6, "relic")
     }
+}
+
+/// A snapshot of one maintenance pass on the vault.
+#[derive(Debug, serde::Serialize)]
+pub struct Maintenance {
+    pub entries: usize,
+    pub reflected: bool,
 }
 
 fn reflection_target(period: &str, now: chrono::DateTime<Utc>) -> Result<(&'static str, String)> {

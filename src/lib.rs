@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod cli;
+pub mod config;
 pub mod entry;
 pub mod git;
 pub mod index;
