@@ -95,6 +95,21 @@ enum Command {
     Reflect {
         #[arg(long, default_value = "weekly")]
         period: String,
+        /// Only create the reflection when the trigger threshold is met
+        #[arg(long)]
+        auto: bool,
+        /// Minimum active entries required by --auto
+        #[arg(long, default_value_t = 5)]
+        min_entries: usize,
+    },
+    /// Detect contradictions and propose reusable patterns
+    Analyze {
+        /// Minimum entries in a tag group to propose a pattern
+        #[arg(long, default_value_t = 2)]
+        min_pattern_members: usize,
+        /// Materialise each proposed pattern as a new pattern entry
+        #[arg(long)]
+        write_patterns: bool,
     },
     /// Show vault statistics
     Stats,
@@ -298,10 +313,64 @@ impl Cli {
                 }
             }
             Command::Reindex => println!("Indexed {} entries", current_vault()?.reindex()?),
-            Command::Reflect { period } => println!(
-                "Created {}",
-                current_vault()?.create_reflection(&period)?.display()
-            ),
+            Command::Reflect {
+                period,
+                auto,
+                min_entries,
+            } => {
+                let vault = current_vault()?;
+                if auto && !vault.should_reflect(&period, min_entries)? {
+                    if vault.reflection_path(&period)?.is_some() {
+                        println!("Reflection already exists; skipping");
+                    } else {
+                        let count = vault.entries()?.len();
+                        println!(
+                            "Skipping reflection: only {count} entries (need >= {min_entries})"
+                        );
+                    }
+                    return Ok(());
+                }
+                println!("Created {}", vault.create_reflection(&period)?.display());
+            }
+            Command::Analyze {
+                min_pattern_members,
+                write_patterns,
+            } => {
+                let vault = current_vault()?;
+                let entries = vault.entries()?;
+                let contradictions = crate::analysis::detect_contradictions(&entries);
+                let patterns = crate::analysis::extract_patterns(&entries, min_pattern_members);
+                if contradictions.is_empty() {
+                    println!("No contradictions detected.");
+                } else {
+                    println!("Contradictions ({}):", contradictions.len());
+                    for contradiction in &contradictions {
+                        println!(
+                            "  {} vs {} ({})",
+                            contradiction.a, contradiction.b, contradiction.reason
+                        );
+                    }
+                }
+                if patterns.is_empty() {
+                    println!(
+                        "No candidate patterns (need >= {min_pattern_members} entries per tag)."
+                    );
+                } else {
+                    println!("Candidate patterns ({}):", patterns.len());
+                    for pattern in &patterns {
+                        println!("  {} ({} members)", pattern.tag, pattern.members.len());
+                    }
+                }
+                if write_patterns {
+                    let mut wrote = 0;
+                    for pattern in &patterns {
+                        let entry = vault.write_pattern(&pattern.tag)?;
+                        wrote += 1;
+                        println!("  wrote {}", entry.meta.id);
+                    }
+                    println!("Wrote {wrote} pattern(s).");
+                }
+            }
             Command::Stats => {
                 let entries = current_vault()?.entries()?;
                 let active = entries.iter().filter(|e| e.meta.status == "active").count();

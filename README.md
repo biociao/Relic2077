@@ -73,7 +73,8 @@ relic search "chunking"
 relic update <entry-id> --confidence 0.9 --tags rag,verified
 relic supersede <old-entry-id> <new-entry-id>
 relic list --status active --tags rag --min-confidence 0.5
-relic reflect --period weekly
+relic analyze
+relic reflect --period weekly --auto --min-entries 5
 relic stats
 relic doctor
 relic sync --remote origin --branch main --message "sync memory"
@@ -357,6 +358,34 @@ sync:
 The cheap, disposable SQLite index (`.relic/index.sqlite`) and embeddings are
 already gitignored, so only your knowledge in Markdown is versioned.
 
+## Reflection and analysis
+
+Reflections are no longer static templates. `relic reflect` synthesises the
+vault into a daily, weekly, or monthly draft that lists recent knowledge, any
+detected contradictions, and candidate patterns to extract.
+
+`relic analyze` reports those two signals without writing anything:
+
+```bash
+relic analyze
+```
+
+- **Contradiction detection** pairs active entries that share a subject tag but
+  carry opposite claim polarity (positive vs. negative language such as "works"
+  vs. "fails"). It flags a pair for review; it does not judge which is correct.
+- **Pattern extraction** groups active entries by subject tag and proposes a
+  reusable pattern when a group reaches a minimum size. `--write-patterns`
+  materialises each proposal as a `pattern` entry.
+
+Reflections can be triggered automatically instead of on demand:
+
+```bash
+relic reflect --period daily --auto --min-entries 5
+```
+
+`--auto` creates the reflection only when it does not already exist for that
+period and the vault holds at least `--min-entries` entries (default 5).
+
 ## Principles
 
 1. **Plain text owns the truth.** The database can always be deleted and rebuilt.
@@ -382,5 +411,5 @@ AGENTS.md         instructions for any agent entering the vault
 - **0.2 (complete):** update/supersede CLI commands, decay calculation, richer filters
 - **0.3 (complete):** Streamable HTTP transport (JSON + SSE streaming, batches), optional Bearer authentication, `mcp-session-id` sessions, and OAuth 2.1 discovery metadata
 - **0.4 (complete):** `relic sync` git commit/pull/push with deterministic conflict resolution that preserves local versions
-- **0.5:** reflection triggers, contradiction detection, and pattern extraction
+- **0.5 (complete):** reflection synthesis with automatic `--auto` triggers, contradiction detection, and pattern extraction
 - **1.0:** stable storage schema, adapters, daemon, and multi-device workflow

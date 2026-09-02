@@ -228,29 +228,41 @@ impl Vault {
 
     pub fn create_reflection(&self, period: &str) -> Result<PathBuf> {
         let now = Utc::now();
-        let (folder, filename) = match period {
-            "daily" => ("reflections/daily", now.format("%Y-%m-%d.md").to_string()),
-            "weekly" => (
-                "reflections/weekly",
-                format!("{}-w{:02}.md", now.year(), now.iso_week().week()),
-            ),
-            "monthly" => ("reflections/monthly", now.format("%Y-%m.md").to_string()),
-            _ => bail!("period must be daily, weekly, or monthly"),
-        };
+        let (folder, filename) = reflection_target(period, now)?;
         let path = self.root.join(folder).join(filename);
         if path.exists() {
             bail!("reflection already exists: {}", path.display());
         }
-        let recent = self
-            .entries()?
-            .into_iter()
+        let entries = self.entries()?;
+        let recent = entries
+            .iter()
             .take(10)
             .map(|entry| format!("- [{}] {}", entry.meta.id, entry.meta.title))
             .collect::<Vec<_>>()
             .join("\n");
+        let contradictions = crate::analysis::detect_contradictions(&entries);
+        let patterns = crate::analysis::extract_patterns(&entries, 2);
+        let contradiction_section = if contradictions.is_empty() {
+            "- None recorded yet.".to_string()
+        } else {
+            contradictions
+                .iter()
+                .map(|c| format!("- `{}` vs `{}` ({})", c.a, c.b, c.reason))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let pattern_section = if patterns.is_empty() {
+            "- No candidate pattern yet; add related entries first.".to_string()
+        } else {
+            patterns
+                .iter()
+                .map(|p| format!("- [ ] `{}` from {} member(s)", p.title, p.members.len()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         let id = format!("reflection-{}-{}", now.format("%Y%m%d"), period);
         let text = format!(
-            "---\nid: {id}\ntype: reflection\ntitle: \"{} reflection\"\nstatus: active\nconfidence: 1.0\ntags: [reflection, {period}]\nsource_agents: []\ncreated: {}\nupdated: {}\nlast_verified: {}\nexpires: null\nsupersedes: []\nsuperseded_by: null\nlinks: []\ndecay_rate: 0.0\n---\n\n# {} reflection\n\n## Recent knowledge\n{recent}\n\n## Contradictions\n- None recorded yet.\n\n## Patterns worth extracting\n- [ ] Review recurring themes.\n\n## Actions\n- [ ] Verify fading knowledge.\n",
+            "---\nid: {id}\ntype: reflection\ntitle: \"{} reflection\"\nstatus: active\nconfidence: 1.0\ntags: [reflection, {period}]\nsource_agents: []\ncreated: {}\nupdated: {}\nlast_verified: {}\nexpires: null\nsupersedes: []\nsuperseded_by: null\nlinks: []\ndecay_rate: 0.0\n---\n\n# {} reflection\n\n## Recent knowledge\n{recent}\n\n## Contradictions\n{contradiction_section}\n\n## Patterns worth extracting\n{pattern_section}\n\n## Actions\n- [ ] Verify fading knowledge.\n",
             period,
             now.to_rfc3339(),
             now.to_rfc3339(),
@@ -260,6 +272,59 @@ impl Vault {
         fs::write(&path, text)?;
         self.reindex()?;
         Ok(path)
+    }
+
+    /// The path a reflection would take for `period`, if it already exists.
+    pub fn reflection_path(&self, period: &str) -> Result<Option<PathBuf>> {
+        let now = Utc::now();
+        let (folder, filename) = reflection_target(period, now)?;
+        let path = self.root.join(folder).join(filename);
+        Ok(path.exists().then_some(path))
+    }
+
+    /// Decide whether an automatic reflection should be created: it must not
+    /// already exist and the vault must hold at least `min_entries` entries.
+    pub fn should_reflect(&self, period: &str, min_entries: usize) -> Result<bool> {
+        if self.reflection_path(period)?.is_some() {
+            return Ok(false);
+        }
+        if self.entries()?.len() < min_entries {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Create a pattern entry from a pattern proposal for the given tag.
+    pub fn write_pattern(&self, tag: &str) -> Result<Entry> {
+        let entries = self.entries()?;
+        let proposal = crate::analysis::extract_patterns(&entries, 1)
+            .into_iter()
+            .find(|proposal| proposal.tag == tag)
+            .with_context(|| format!("no entries carry the tag '{tag}'"))?;
+        let title = proposal.title;
+        let content = format!(
+            "{}\n\nExtracted from: {}",
+            proposal.body,
+            proposal
+                .members_ids
+                .iter()
+                .map(|id| format!("`{id}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        self.create(&title, &content, "pattern", proposal.members, 0.6, "relic")
+    }
+}
+
+fn reflection_target(period: &str, now: chrono::DateTime<Utc>) -> Result<(&'static str, String)> {
+    match period {
+        "daily" => Ok(("reflections/daily", now.format("%Y-%m-%d.md").to_string())),
+        "weekly" => Ok((
+            "reflections/weekly",
+            format!("{}-w{:02}.md", now.year(), now.iso_week().week()),
+        )),
+        "monthly" => Ok(("reflections/monthly", now.format("%Y-%m.md").to_string())),
+        _ => bail!("period must be daily, weekly, or monthly"),
     }
 }
 
