@@ -1,19 +1,27 @@
 use crate::vault::{EntryPatch, Vault};
 use anyhow::{Context, Result, bail};
+use async_stream::stream;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, ORIGIN, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const INSTRUCTIONS: &str = "Relic is the user's local-first knowledge vault. Search before creating to avoid duplicates. Preserve entry IDs and history. Use confidence honestly. Prefer superseding obsolete knowledge over deleting it. Read tools are safe; write tools change Markdown files in the configured local vault.";
+const SESSION_HEADER: &str = "mcp-session-id";
+const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+const OAUTH_TITLE: &str = "Relic2077 OAuth 2.1 Authorization Server";
 
 #[derive(Clone)]
 struct HttpState {
@@ -21,6 +29,7 @@ struct HttpState {
     source_agent: Arc<str>,
     bearer_token: Option<Arc<str>>,
     allowed_origins: Arc<[String]>,
+    sessions: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 pub fn serve_http(
@@ -70,18 +79,44 @@ pub fn http_router(
         source_agent: Arc::from(source_agent),
         bearer_token: bearer_token.map(Arc::from),
         allowed_origins: allowed_origins.into(),
+        sessions: Arc::new(Mutex::new(HashMap::new())),
     };
     Router::new()
         .route("/mcp", get(http_get).post(http_post))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth_metadata),
+        )
         .with_state(state)
 }
 
-async fn http_get() -> StatusCode {
-    StatusCode::METHOD_NOT_ALLOWED
+async fn http_get(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = validate_endpoint_headers(&state, &headers) {
+        return *response;
+    }
+    if let Err(response) = validate_session(&state, &headers) {
+        return *response;
+    }
+    // A long-lived Server-Sent Events channel for server-initiated messages.
+    // The channel stays open; a keep-alive comment is flushed periodically so
+    // clients can detect a still-live connection. Responses to tool calls are
+    // delivered over the POST response stream instead.
+    let channel = stream! {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            yield Ok::<Event, std::convert::Infallible>(Event::default());
+        }
+    };
+    Sse::new(channel)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn http_post(State(state): State<HttpState>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(response) = validate_http_headers(&state, &headers) {
+        return *response;
+    }
+    if let Err(response) = validate_session(&state, &headers) {
         return *response;
     }
     let request: Value = match serde_json::from_slice(&body) {
@@ -93,7 +128,7 @@ async fn http_post(State(state): State<HttpState>, headers: HeaderMap, body: Byt
             );
         }
     };
-    let response = {
+    let responses = {
         let vault = match state.vault.lock() {
             Ok(vault) => vault,
             Err(_) => {
@@ -103,15 +138,119 @@ async fn http_post(State(state): State<HttpState>, headers: HeaderMap, body: Byt
                 );
             }
         };
-        handle_request(&vault, request, &state.source_agent)
+        process_request(&vault, &request, &state.source_agent)
     };
-    match response {
-        Some(response) => json_response(StatusCode::OK, response),
-        None => StatusCode::ACCEPTED.into_response(),
+    let session_id = if messages(request.clone()).any(is_initialize) {
+        let session_id = Uuid::new_v4().simple().to_string();
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.insert(session_id.clone(), Instant::now());
+        }
+        Some(session_id)
+    } else {
+        None
+    };
+    let wants_sse = headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.contains("text/event-stream") && !value.contains("application/json")
+        });
+    if responses.iter().all(Option::is_none) {
+        // A request containing only notifications is acknowledged, not answered.
+        let response = StatusCode::ACCEPTED.into_response();
+        return attach_session(response, session_id.as_deref());
+    }
+    if wants_sse {
+        let channel = stream! {
+            for response in responses.into_iter().flatten() {
+                yield Ok::<Event, std::convert::Infallible>(
+                    Event::default().event("message").data(response.to_string()),
+                );
+            }
+        };
+        let sse = Sse::new(channel)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+        return attach_session(sse, session_id.as_deref());
+    }
+    let response = if matches!(request, Value::Array(_)) {
+        let results: Vec<_> = responses.into_iter().flatten().collect();
+        json_response(StatusCode::OK, Value::Array(results))
+    } else {
+        match responses.into_iter().flatten().next() {
+            Some(response) => json_response(StatusCode::OK, response),
+            None => StatusCode::ACCEPTED.into_response(),
+        }
+    };
+    attach_session(response, session_id.as_deref())
+}
+
+/// Normalize a request payload (a single message or a batch array) into its
+/// JSON-RPC messages, so session and initialize detection can inspect all of them.
+fn messages(request: Value) -> Box<dyn Iterator<Item = Value>> {
+    match request {
+        Value::Array(items) => Box::new(items.into_iter()),
+        item => Box::new(std::iter::once(item)),
     }
 }
 
+fn is_initialize(message: Value) -> bool {
+    message.get("method").and_then(Value::as_str) == Some("initialize")
+}
+
+/// Run every JSON-RPC message in a payload against the vault, preserving one
+/// optional response per message (notifications produce `None`).
+fn process_request(vault: &Vault, request: &Value, source_agent: &str) -> Vec<Option<Value>> {
+    match request {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| handle_request(vault, item.clone(), source_agent))
+            .collect(),
+        value => vec![handle_request(vault, value.clone(), source_agent)],
+    }
+}
+
+async fn oauth_metadata(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = validate_endpoint_headers(&state, &headers) {
+        return *response;
+    }
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("127.0.0.1");
+    let issuer = format!("http://{host}");
+    let resource = format!("{issuer}/mcp");
+    let metadata = json!({
+        "issuer": issuer,
+        "resource": resource,
+        "authorization_endpoint": format!("{issuer}/oauth/authorize"),
+        "token_endpoint": format!("{issuer}/oauth/token"),
+        "scopes_supported": ["mcp"],
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "service_documentation": OAUTH_TITLE,
+    });
+    json_response(StatusCode::OK, metadata)
+}
+
+fn attach_session(response: Response, session_id: Option<&str>) -> Response {
+    let Some(session_id) = session_id else {
+        return response;
+    };
+    let mut response = response;
+    if let Ok(value) = HeaderValue::from_str(session_id) {
+        response.headers_mut().insert(SESSION_HEADER, value);
+    }
+    response
+}
+
 fn validate_http_headers(state: &HttpState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+    validate_common_headers(state, headers)?;
+    validate_post_headers(state, headers)
+}
+
+fn validate_common_headers(state: &HttpState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     if let Some(origin) = headers.get(ORIGIN) {
         let allowed = origin
             .to_str()
@@ -135,6 +274,10 @@ fn validate_http_headers(state: &HttpState, headers: &HeaderMap) -> Result<(), B
             return Err(Box::new(response));
         }
     }
+    Ok(())
+}
+
+fn validate_post_headers(_state: &HttpState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     let content_type_is_json = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -146,7 +289,7 @@ fn validate_http_headers(state: &HttpState, headers: &HeaderMap) -> Result<(), B
         .get(ACCEPT)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| {
-            value.contains("application/json") && value.contains("text/event-stream")
+            value.contains("application/json") || value.contains("text/event-stream")
         });
     if !accepts_required_types {
         return Err(Box::new(StatusCode::NOT_ACCEPTABLE.into_response()));
@@ -157,6 +300,44 @@ fn validate_http_headers(state: &HttpState, headers: &HeaderMap) -> Result<(), B
         return Err(Box::new(StatusCode::BAD_REQUEST.into_response()));
     }
     Ok(())
+}
+
+/// Validate the origin and bearer token for a non-POST endpoint (SSE / SSE
+/// discovery). These endpoints carry no JSON body, so content-type and
+/// protocol-version checks do not apply.
+fn validate_endpoint_headers(state: &HttpState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+    validate_common_headers(state, headers)
+}
+
+/// Accept a request carrying a known, unexpired session id; reject an unknown
+/// or expired one with 404. A request with no session id is permitted so that
+/// state-free clients keep working with this stateless-capable server.
+fn validate_session(state: &HttpState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+    let Some(session_id) = headers
+        .get(SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Ok(());
+    };
+    let valid = state
+        .sessions
+        .lock()
+        .map(|mut sessions| match sessions.get_mut(session_id) {
+            Some(last) if last.elapsed() < SESSION_IDLE_TTL => {
+                *last = Instant::now();
+                true
+            }
+            Some(_) => {
+                sessions.remove(session_id);
+                false
+            }
+            None => false,
+        });
+    if valid.unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(Box::new(StatusCode::NOT_FOUND.into_response()))
+    }
 }
 
 fn json_response(status: StatusCode, value: Value) -> Response {
@@ -226,7 +407,10 @@ fn handle_request(vault: &Vault, request: Value, source_agent: &str) -> Option<V
     let result: Result<Value> = match method {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": { "listChanged": false } },
+            "capabilities": {
+                "tools": { "listChanged": false },
+                "oauth": { "supported": true }
+            },
             "serverInfo": { "name": "relic2077", "version": env!("CARGO_PKG_VERSION") },
             "instructions": INSTRUCTIONS
         })),

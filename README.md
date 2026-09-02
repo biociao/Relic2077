@@ -116,6 +116,21 @@ curl http://127.0.0.1:7337/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 ```
 
+`mcp-http` implements the Streamable HTTP transport: single-message requests return
+one JSON response, batch requests (a JSON array) return a JSON array, notifications
+are acknowledged with `202 Accepted`, and a client that sends only
+`Accept: text/event-stream` receives its responses streamed as Server-Sent Events.
+`GET /mcp` opens a long-lived SSE channel for future server-initiated messages.
+
+After `initialize`, the server issues an `mcp-session-id` and validates it on
+subsequent requests, rejecting an unknown or expired session with `404`. Clients
+that omit the session id continue to work (the server is stateless-capable). The
+server also serves OAuth 2.1 Authorization Server Metadata at
+`/.well-known/oauth-authorization-server` and advertises `oauth` in its
+`initialize` capabilities; the described token endpoints are scaffolding for a
+remote deployment, while the configured Bearer token (`--bearer-token-env`) is
+what actually protects the local endpoint.
+
 Non-loopback binding requires Bearer authentication. Supply the secret through
 an environment variable rather than a command-line value:
 
@@ -125,10 +140,6 @@ relic mcp-http --vault ~/relic-vault --bind 0.0.0.0:7337 \
   --bearer-token-env RELIC_MCP_TOKEN \
   --allow-origin https://agent.example.com
 ```
-
-This first HTTP implementation returns one JSON response per POST and returns
-HTTP 202 for notifications. It does not yet provide SSE streams, sessions, or
-OAuth discovery.
 
 Configure Relic for an agent project and optionally add active memory guidance:
 
@@ -335,7 +346,7 @@ AGENTS.md         instructions for any agent entering the vault
 ## Roadmap
 
 - **0.2 (complete):** update/supersede CLI commands, decay calculation, richer filters
-- **0.3 (in progress):** Streamable HTTP JSON transport and optional Bearer authentication; SSE, sessions, and OAuth remain
+- **0.3 (complete):** Streamable HTTP transport (JSON + SSE streaming, batches), optional Bearer authentication, `mcp-session-id` sessions, and OAuth 2.1 discovery metadata
 - **0.4:** Git synchronization and conflict resolution
 - **0.5:** reflection triggers, contradiction detection, and pattern extraction
 - **1.0:** stable storage schema, adapters, daemon, and multi-device workflow
