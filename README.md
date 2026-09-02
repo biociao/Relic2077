@@ -76,6 +76,7 @@ relic list --status active --tags rag --min-confidence 0.5
 relic reflect --period weekly
 relic stats
 relic doctor
+relic sync --remote origin --branch main --message "sync memory"
 ```
 
 `relic list` displays effective confidence. Relic continuously decays the stored
@@ -323,6 +324,39 @@ The server publishes eight tools: `relic_search`, `relic_get_entry`,
 Read-only and write operations carry MCP tool annotations so compatible clients
 can apply appropriate approval policies.
 
+## Sync with Git
+
+The vault is a normal Git repository. `relic sync` moves a checked-out vault in
+one deterministic step:
+
+```bash
+relic sync --remote origin --branch main --message "sync memory"
+```
+
+`sync` first ensures the directory is a Git repository (initialising one and an
+initial commit if needed), commits any local Markdown changes, fetches and merges
+the remote branch, then pushes. The remote name defaults to `origin`, and the
+branch defaults to the currently checked-out branch, so the common case is simply
+`relic sync`.
+
+When a merge conflicts, Relic resolves it deterministically: the remote (theirs)
+version becomes the canonical file and the local (ours) version is preserved
+under `.relic/conflicts/<timestamp>/` — knowledge is never silently dropped. The
+search index is rebuilt after every merge regardless of outcome.
+
+Configure a default remote once in `.relic/config.yaml`:
+
+```yaml
+sync:
+  mode: manual
+  remotes:
+    - name: origin
+      url: git@github.com:you/relic-vault.git
+```
+
+The cheap, disposable SQLite index (`.relic/index.sqlite`) and embeddings are
+already gitignored, so only your knowledge in Markdown is versioned.
+
 ## Principles
 
 1. **Plain text owns the truth.** The database can always be deleted and rebuilt.
@@ -347,6 +381,6 @@ AGENTS.md         instructions for any agent entering the vault
 
 - **0.2 (complete):** update/supersede CLI commands, decay calculation, richer filters
 - **0.3 (complete):** Streamable HTTP transport (JSON + SSE streaming, batches), optional Bearer authentication, `mcp-session-id` sessions, and OAuth 2.1 discovery metadata
-- **0.4:** Git synchronization and conflict resolution
+- **0.4 (complete):** `relic sync` git commit/pull/push with deterministic conflict resolution that preserves local versions
 - **0.5:** reflection triggers, contradiction detection, and pattern extraction
 - **1.0:** stable storage schema, adapters, daemon, and multi-device workflow

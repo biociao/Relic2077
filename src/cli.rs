@@ -100,6 +100,18 @@ enum Command {
     Stats,
     /// Check vault health
     Doctor,
+    /// Commit, pull, and push the vault with a git remote
+    Sync {
+        /// Remote name to push to and pull from
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// Branch to sync; defaults to the currently checked-out branch
+        #[arg(long)]
+        branch: Option<String>,
+        /// Commit message for local changes
+        #[arg(long, default_value = "relic: sync knowledge vault")]
+        message: String,
+    },
     /// Connect Relic to an agent project
     Integrate {
         #[command(subcommand)]
@@ -317,6 +329,33 @@ impl Cli {
                     "Vault healthy: {} valid entries; index rebuilt",
                     entries.len()
                 );
+            }
+            Command::Sync {
+                remote,
+                branch,
+                message,
+            } => {
+                let vault = current_vault()?;
+                let branch = match branch {
+                    Some(branch) => branch,
+                    None => crate::git::current_branch(&vault.root)?,
+                };
+                let outcome = crate::git::sync(&vault.root, &remote, &branch, &message)?;
+                println!(
+                    "Synced {}/{} at {}",
+                    outcome.remote, outcome.branch, outcome.head
+                );
+                println!("committed local changes: {}", outcome.committed);
+                println!("pulled remote changes: {}", outcome.pulled);
+                if !outcome.resolved.is_empty() {
+                    println!(
+                        "resolved conflicts (remote kept, local preserved under .relic/conflicts):"
+                    );
+                    for path in &outcome.resolved {
+                        println!("  {path}");
+                    }
+                }
+                println!("pushed to {}/{}", outcome.remote, outcome.branch);
             }
             Command::Integrate { agent } => {
                 if let Integration::Dsh(args) = &agent {
