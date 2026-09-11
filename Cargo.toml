@@ -2,6 +2,7 @@
 name = "relic2077"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 description = "A local-first, Git-native knowledge vault for every AI agent"
 license = "MIT"
 repository = "https://github.com/biociao/Relic2077"
@@ -25,10 +26,12 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 toml_edit = "0.22"
 tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "time"] }
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
 walkdir = "2.5"
+sha2 = "0.10"
+zstd = "0.13"
+tempfile = "3.14"
 
 [dev-dependencies]
 http-body-util = "0.1"
-tempfile = "3.14"
 tower = { version = "0.5", features = ["util"] }

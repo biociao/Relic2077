@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -62,6 +63,29 @@ pub struct Entry {
     pub path: PathBuf,
 }
 
+/// Separates a tag's namespace from its value: `src:codex-memory`,
+/// `project:gi03`, `section:failure`, `pool:preconscious`.
+pub const TAG_NAMESPACE_SEPARATOR: char = ':';
+
+/// A tag is either a *scope* or a *subject*.
+///
+/// A namespaced tag scopes a memory — where it came from, which project it
+/// belongs to, which pool it sits in. A bare tag names a subject: what the
+/// memory is about. Only subjects may take part in tag-derived relations,
+/// contradictions and pattern proposals, because a scope shared by hundreds of
+/// memories (an import batch, a project) says nothing about what any two of
+/// them claim, and pairing them produces contradictions that are pure noise.
+///
+/// See `tools/relic-tidy.py` for the convention this encodes.
+pub fn is_subject_tag(tag: &str) -> bool {
+    !tag.contains(TAG_NAMESPACE_SEPARATOR)
+}
+
+/// The tags of an entry that name subjects rather than scopes.
+pub fn subject_tags(tags: &[String]) -> impl Iterator<Item = &String> {
+    tags.iter().filter(|tag| is_subject_tag(tag))
+}
+
 impl Entry {
     pub fn parse(path: &Path, input: &str) -> Result<Self> {
         let input = input
@@ -82,6 +106,40 @@ impl Entry {
     pub fn render(&self) -> Result<String> {
         let yaml = serde_yaml::to_string(&self.meta)?.trim().to_owned();
         Ok(format!("---\n{yaml}\n---\n\n{}\n", self.body.trim()))
+    }
+
+    /// SHA-256 over everything the derived layers read.
+    ///
+    /// The derived graph and the vector cache are keyed on the fingerprint of
+    /// the whole vault, which is built from these digests. Hashing content
+    /// rather than trusting `updated` means a hand edit that forgets to bump
+    /// the timestamp still invalidates the cache instead of serving stale
+    /// neighbours.
+    pub fn content_hash(&self) -> String {
+        let mut hasher = Sha256::new();
+        let meta = &self.meta;
+        hasher.update(meta.id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(meta.kind.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(meta.title.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(meta.status.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(meta.confidence.to_le_bytes());
+        hasher.update(b"\0");
+        hasher.update(meta.tags.join("\u{1f}").as_bytes());
+        hasher.update(b"\0");
+        hasher.update(meta.source_agents.join("\u{1f}").as_bytes());
+        hasher.update(b"\0");
+        hasher.update(meta.links.join("\u{1f}").as_bytes());
+        hasher.update(b"\0");
+        hasher.update(meta.supersedes.join("\u{1f}").as_bytes());
+        hasher.update(b"\0");
+        hasher.update(meta.superseded_by.clone().unwrap_or_default().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.body.as_bytes());
+        format!("{:x}", hasher.finalize())
     }
 }
 

@@ -170,6 +170,12 @@ pub struct SyncOutcome {
 /// favour of the remote while preserving local versions), then push. This is the
 /// entry point for the `relic sync` subcommand.
 pub fn sync(root: &Path, remote: &str, branch: &str, message: &str) -> Result<SyncOutcome> {
+    let _lock = crate::automation::lock(
+        &Vault {
+            root: root.to_owned(),
+        },
+        "git.lock",
+    )?;
     ensure_repository(root)?;
     let initial = ensure_initial_commit(root, message)?;
     let was_dirty = dirty(root)?;
@@ -216,4 +222,174 @@ pub fn sync(root: &Path, remote: &str, branch: &str, message: &str) -> Result<Sy
         branch: branch.to_string(),
         message: message.to_string(),
     })
+}
+
+#[derive(Debug)]
+pub struct SyncConflict;
+impl std::fmt::Display for SyncConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Automatic sync paused: resolve the vault's Git conflict, commit the resolution, then retry"
+        )
+    }
+}
+impl std::error::Error for SyncConflict {}
+
+fn automation_repository(root: &Path) -> Result<()> {
+    ensure_repository(root)?;
+    let top = git(root, &["rev-parse", "--show-toplevel"])?;
+    anyhow::ensure!(
+        fs::canonicalize(top)? == fs::canonicalize(root)?,
+        "Vault must be its own Git repository for automatic sync"
+    );
+    Ok(())
+}
+
+/// Include file contents, not just Git's M marker, so continuous edits debounce.
+pub fn automation_fingerprint(root: &Path) -> Result<String> {
+    use std::hash::{Hash, Hasher};
+    use std::io::Read;
+    automation_repository(root)?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-c", "-o", "--exclude-standard", "-z"])
+        .output()?;
+    anyhow::ensure!(output.status.success(), "Cannot enumerate vault files");
+    let mut paths: Vec<_> = output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let mut hash = std::hash::DefaultHasher::new();
+    for bytes in paths {
+        let path = std::str::from_utf8(bytes).context("Vault paths must be UTF-8")?;
+        bytes.hash(&mut hash);
+        let full = root.join(path);
+        if !full.exists() {
+            continue;
+        }
+        if full.symlink_metadata()?.file_type().is_symlink() {
+            fs::read_link(full)?.hash(&mut hash);
+        } else if full.is_file() {
+            let mut file = fs::File::open(full)?;
+            let mut buffer = [0u8; 16384];
+            loop {
+                let n = file.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                hash.write(&buffer[..n]);
+            }
+        }
+    }
+    Ok(format!("{:016x}", hash.finish()))
+}
+
+/// No prompts and a bounded child lifetime. File-backed output avoids pipe deadlocks.
+fn unattended_git(root: &Path, args: &[&str]) -> Result<String> {
+    use std::{
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+    let dir = root.join(".relic/automation");
+    fs::create_dir_all(&dir)?;
+    let out = dir.join("git.stdout");
+    let err = dir.join("git.stderr");
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes -oConnectTimeout=10")
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&out)?)
+        .stderr(fs::File::create(&err)?)
+        .spawn()?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let stdout = fs::read_to_string(&out)?;
+            let stderr = fs::read_to_string(&err)?;
+            let _ = fs::remove_file(&out);
+            let _ = fs::remove_file(&err);
+            anyhow::ensure!(
+                status.success(),
+                "git {} failed: {}",
+                args.first().unwrap_or(&""),
+                stderr.trim()
+            );
+            return Ok(stdout.trim().to_owned());
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(&out);
+            let _ = fs::remove_file(&err);
+            bail!("git operation timed out after 30 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Preserve conflicts in Git for explicit resolution; never choose ours/theirs.
+pub fn sync_unattended(root: &Path, remote: &str, url: &str) -> Result<()> {
+    let vault = Vault {
+        root: root.to_owned(),
+    };
+    let _lock = crate::automation::lock(&vault, "git.lock")?;
+    automation_repository(root)?;
+    if !unmerged_paths(root)?.is_empty()
+        || git_result(root, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok()
+    {
+        return Err(SyncConflict.into());
+    }
+    anyhow::ensure!(!remote.starts_with('-'), "Invalid remote name");
+    ensure_remote(root, remote, url)?;
+    anyhow::ensure!(
+        git(root, &["remote", "get-url", remote])? == url,
+        "Configured remote URL differs from Git; update it explicitly before automatic sync"
+    );
+    // Validate knowledge before publication; capture candidates remain review-only.
+    vault.entries()?;
+    unattended_git(root, &["add", "-A"])?;
+    if dirty(root)? {
+        unattended_git(
+            root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "relic: automatic memory sync",
+            ],
+        )?;
+    }
+    let branch = current_branch(root)?;
+    anyhow::ensure!(branch != "HEAD", "Automatic sync requires a named branch");
+    unattended_git(root, &["fetch", remote])?;
+    if remote_branch_exists(root, remote, &branch)?
+        && let Err(e) = unattended_git(
+            root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "merge",
+                "--no-edit",
+                &format!("{remote}/{branch}"),
+            ],
+        )
+    {
+        if !unmerged_paths(root)?.is_empty() {
+            return Err(SyncConflict.into());
+        }
+        return Err(e);
+    }
+    vault.reindex()?;
+    unattended_git(root, &["push", "--set-upstream", remote, &branch])?;
+    Ok(())
 }

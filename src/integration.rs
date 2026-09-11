@@ -18,6 +18,8 @@ Before substantial work:
 
 After substantial work:
 - Store durable decisions, verified fixes, reusable lessons, and hidden constraints.
+- For experiences needing review, use relic_capture with a stable event_id, project, session_id, context, action, outcome, and evidence; reuse the same event identity and payload on retry.
+- Process captures with relic_process_captures (or relic watch), inspect related entries and evidence with relic_get_capture, then use relic_review_capture to accept reviewed knowledge or reject duplicates. Capture alone does not publish knowledge.
 - Update an existing entry instead of creating a duplicate.
 - Supersede obsolete knowledge instead of deleting it.
 - Never store secrets, raw logs, temporary status, or facts obvious from the repository.

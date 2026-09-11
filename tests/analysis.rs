@@ -1,4 +1,6 @@
-use relic2077::analysis::{detect_contradictions, extract_patterns};
+use relic2077::analysis::{
+    CLAIM_MINIMUM_STRENGTH, claim, detect_contradictions, extract_patterns, polarity,
+};
 use relic2077::vault::Vault;
 use std::fs;
 use tempfile::tempdir;
@@ -55,6 +57,57 @@ fn does_not_flag_entries_with_match_polarity_or_disjoint_subjects() {
     // A and B share "alpha" but both are positive; C contradicts none because
     // it belongs to a disjoint subject tag ("beta").
     assert!(contradictions.is_empty());
+}
+
+#[test]
+fn polarity_matches_words_not_substrings() {
+    // Containment is not a claim: "validate" contains "valid", and "against" in
+    // "against the corpus" is a preposition rather than a negative verdict.
+    assert_eq!(polarity("Validate the split against the corpus."), 0);
+    assert_eq!(polarity("The index is rebuilt after every merge."), 0);
+    assert_eq!(polarity("Nothing is silently dropped."), 0);
+
+    // Inflections of a marker still count.
+    assert_eq!(polarity("The approach works."), 1);
+    assert_eq!(polarity("The approach failed."), -1);
+    assert_eq!(polarity("The strategy is ineffective and broken."), -1);
+    assert_eq!(polarity("The strategy is effective and reliable."), 1);
+}
+
+#[test]
+fn one_incidental_marker_is_not_a_claim() {
+    // "avoids" is a negative word, but one incidental marker is not a verdict.
+    let weak = claim("Recursive splitting avoids mid sentence cuts.");
+    assert_eq!(weak.net(), -1);
+    assert_eq!(weak.strength(), 1);
+    assert!(!weak.is_decisive(CLAIM_MINIMUM_STRENGTH));
+
+    let decisive = claim("The strategy is ineffective and broken.");
+    assert_eq!(decisive.net(), -1);
+    assert!(decisive.is_decisive(CLAIM_MINIMUM_STRENGTH));
+}
+
+#[test]
+fn compatible_memories_about_one_subject_are_not_contradictions() {
+    // Two memories describing the same technique in the same direction. One of
+    // them contains "avoids"; the other contains "use" and "works". Counting
+    // any marker as a claim made this pair look like a contradiction.
+    let (_dir, vault) = vault_with(&[
+        (
+            "Chunking strategy for retrieval",
+            "Use 512 token chunks for prose documents and validate the split against the corpus. Recursive splitting works better than a fixed character budget.",
+            &["rag"],
+        ),
+        (
+            "Retrieval chunk size selection",
+            "Chunk prose at 512 tokens so retrieval quality stays stable. Recursive splitting by heading avoids mid sentence cuts and keeps code blocks intact.",
+            &["rag"],
+        ),
+    ]);
+    assert!(
+        detect_contradictions(&vault.entries().unwrap()).is_empty(),
+        "agreeing memories were reported as contradicting"
+    );
 }
 
 #[test]
@@ -145,4 +198,49 @@ fn reflection_auto_trigger_skips_when_already_present() {
     // Once the reflection exists, the same-period trigger is a no-op.
     assert!(!vault.should_reflect("daily", 5).unwrap());
     let _ = directory;
+}
+
+#[test]
+fn namespaced_scope_tags_never_produce_contradictions_or_patterns() {
+    // A provenance tag shared by an import batch, or a project tag shared by a
+    // whole repository, is a *scope*, not a subject. Pairing everything inside
+    // it would claim a contradiction between two memories that were merely
+    // imported together — the failure mode of the 182-entry Codex import.
+    let (_dir, vault) = vault_with(&[
+        (
+            "Batch entry one",
+            "The pipeline works and is reliable.",
+            &["src:codex-memory", "project:gi03", "pool:preconscious"],
+        ),
+        (
+            "Batch entry two",
+            "The pipeline fails and is unreliable.",
+            &["src:codex-memory", "project:gi03", "pool:preconscious"],
+        ),
+        (
+            "Batch entry three",
+            "The pipeline works and is effective.",
+            &["src:codex-memory", "project:gi03", "pool:preconscious"],
+        ),
+    ]);
+    let entries = vault.entries().unwrap();
+    assert!(detect_contradictions(&entries).is_empty());
+    assert!(extract_patterns(&entries, 2).is_empty());
+
+    // The same entries *do* relate once they carry a real subject tag.
+    let (_dir, vault) = vault_with(&[
+        (
+            "Subject entry one",
+            "The pipeline works and is reliable.",
+            &["src:codex-memory", "pipeline"],
+        ),
+        (
+            "Subject entry two",
+            "The pipeline fails and is unreliable.",
+            &["src:codex-memory", "pipeline"],
+        ),
+    ]);
+    let entries = vault.entries().unwrap();
+    assert_eq!(detect_contradictions(&entries).len(), 1);
+    assert_eq!(extract_patterns(&entries, 2).len(), 1);
 }

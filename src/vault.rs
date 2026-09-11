@@ -1,7 +1,11 @@
+use crate::embedding::{EmbeddingIndex, SimilarityHit};
 use crate::entry::{Entry, EntryMeta, slugify};
+use crate::graph::Graph;
 use crate::index::Index;
+use crate::search::RelatedMemory;
 use anyhow::{Context, Result, bail};
 use chrono::{Datelike, Utc};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -78,6 +82,9 @@ impl Vault {
         if !(0.0..=1.0).contains(&confidence) {
             bail!("confidence must be between 0 and 1");
         }
+        // Validate before creating the Markdown file. Configuration changes
+        // apply to new memories without rewriting existing confidence history.
+        let config = self.config()?;
         let now = Utc::now();
         let short_id = &Uuid::new_v4().simple().to_string()[..6];
         let id = format!("relic-{}-{short_id}", now.format("%Y%m%d"));
@@ -111,7 +118,7 @@ impl Vault {
                 supersedes: vec![],
                 superseded_by: None,
                 links: vec![],
-                decay_rate: 0.05,
+                decay_rate: config.vault.default_decay_rate,
             },
             body: format!("# {title}\n\n{content}"),
             path,
@@ -226,6 +233,127 @@ impl Vault {
         Index::open(&self.root.join(".relic/index.sqlite"))?.search(query, limit)
     }
 
+    /// Keyword search for a memory containing *any* of the query's terms, for
+    /// prompt-driven retrieval where the wording is a bag of hints.
+    pub fn search_any(&self, query: &str, limit: usize) -> Result<Vec<crate::index::SearchHit>> {
+        self.reindex()?;
+        Index::open(&self.root.join(".relic/index.sqlite"))?.search_any(query, limit)
+    }
+
+    /// Where the derived relation network lives. Disposable and gitignored: it
+    /// is rebuilt from Markdown whenever it is missing or stale.
+    pub fn graph_path(&self) -> PathBuf {
+        self.root.join(".relic").join("graph.json")
+    }
+
+    /// Where the derived vector layer lives. Also disposable and gitignored.
+    pub fn embeddings_path(&self) -> PathBuf {
+        self.root
+            .join(".relic")
+            .join("embeddings")
+            .join("store.bin")
+    }
+
+    /// The knowledge graph for the vault's current content.
+    ///
+    /// Rebuilt only when the Markdown actually changed, which is what makes it
+    /// safe for a query path to call this: an unchanged vault reads one small
+    /// JSON file instead of re-tokenizing every memory. A rebuild is never
+    /// triggered by a *deleted* cache file alone being an error — every derived
+    /// artifact here is reproducible by construction.
+    pub fn graph(&self) -> Result<Graph> {
+        let entries = self.entries()?;
+        let fingerprint = crate::graph::fingerprint(&entries);
+        if let Some(graph) = Graph::load(&self.graph_path(), &fingerprint)? {
+            return Ok(graph);
+        }
+        self.build_graph(&entries, &fingerprint)
+    }
+
+    /// Rebuild the vector layer and the graph unconditionally.
+    pub fn rebuild_graph(&self) -> Result<Graph> {
+        let entries = self.entries()?;
+        let fingerprint = crate::graph::fingerprint(&entries);
+        self.build_graph(&entries, &fingerprint)
+    }
+
+    fn build_graph(&self, entries: &[Entry], fingerprint: &str) -> Result<Graph> {
+        let config = self.config()?;
+        let embeddings = self.build_embeddings(entries, fingerprint, config.graph.dimensions)?;
+        let graph = Graph::build(entries, &embeddings, &config.graph, fingerprint);
+        graph.save(&self.graph_path())?;
+        Ok(graph)
+    }
+
+    /// The vector layer for the vault's current content, from cache when fresh.
+    pub fn embeddings(&self) -> Result<EmbeddingIndex> {
+        let entries = self.entries()?;
+        let fingerprint = crate::graph::fingerprint(&entries);
+        let dimensions = self.config()?.graph.dimensions;
+        self.build_embeddings(&entries, &fingerprint, dimensions)
+    }
+
+    fn build_embeddings(
+        &self,
+        entries: &[Entry],
+        fingerprint: &str,
+        dimensions: usize,
+    ) -> Result<EmbeddingIndex> {
+        let path = self.embeddings_path();
+        if let Some(index) = EmbeddingIndex::load(&path, fingerprint, dimensions)? {
+            return Ok(index);
+        }
+        let index = EmbeddingIndex::build(entries, dimensions, fingerprint)?;
+        // The cache is an optimisation, so a read-only vault or a full disk must
+        // not turn a successful analysis into a failure.
+        let _ = index.save(&path);
+        Ok(index)
+    }
+
+    /// Memories closest to one memory in the vector space.
+    pub fn similar(
+        &self,
+        id: &str,
+        limit: usize,
+        minimum_similarity: f64,
+    ) -> Result<Vec<RelatedMemory>> {
+        let entries = self.entries()?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.meta.id == id)
+            .with_context(|| format!("entry '{id}' not found"))?;
+        let embeddings = self.embeddings()?;
+        let position = embeddings
+            .position_of(&entry.meta.id)
+            .with_context(|| format!("entry '{id}' has no vector"))?;
+        Ok(related_from(
+            &entries,
+            embeddings.nearest_from(position, limit, minimum_similarity),
+        ))
+    }
+
+    /// Memories closest to arbitrary text.
+    pub fn semantic_queries(&self, query: &str, limit: usize) -> Result<Vec<RelatedMemory>> {
+        let entries = self.entries()?;
+        let embeddings = self.embeddings()?;
+        let vector = embeddings.encode(query);
+        let minimum = self.config()?.graph.semantic_min_similarity;
+        Ok(related_from(
+            &entries,
+            embeddings.nearest(&vector, limit, minimum, None),
+        ))
+    }
+
+    /// Hybrid retrieval: FTS5 keyword precision fused with vector recall.
+    pub fn hybrid_search(
+        &self,
+        query: &str,
+        limit: usize,
+        mode: crate::search::Mode,
+    ) -> Result<Vec<crate::search::FusedHit>> {
+        crate::search::search(self, query, limit, mode)
+    }
+
     /// Load and validate the vault's `.relic/config.yaml`.
     pub fn config(&self) -> Result<crate::config::Config> {
         crate::config::Config::load(&self.root)
@@ -234,6 +362,7 @@ impl Vault {
     /// Rebuild the index and, if the reflection trigger is met, write a
     /// reflection draft. This is the workhorse for the `relic watch` daemon.
     pub fn maintain(&self, period: &str, min_entries: usize) -> Result<Maintenance> {
+        let captures = crate::capture::work(self, 100)?;
         let entries = self.entries()?;
         self.reindex()?;
         let reflected = if self.should_reflect(period, min_entries)? {
@@ -245,6 +374,7 @@ impl Vault {
         Ok(Maintenance {
             entries: entries.len(),
             reflected,
+            captures,
         })
     }
 
@@ -324,17 +454,27 @@ impl Vault {
             .find(|proposal| proposal.tag == tag)
             .with_context(|| format!("no entries carry the tag '{tag}'"))?;
         let title = proposal.title;
+        let members_ids = proposal.members_ids.clone();
         let content = format!(
             "{}\n\nExtracted from: {}",
             proposal.body,
-            proposal
-                .members_ids
+            members_ids
                 .iter()
                 .map(|id| format!("`{id}`"))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        self.create(&title, &content, "pattern", proposal.members, 0.6, "relic")
+        let entry = self.create(&title, &content, "pattern", proposal.members, 0.6, "relic")?;
+        // Record membership as declared links as well as prose, so the derived
+        // graph can carry a pattern's provenance as a real edge instead of
+        // having to parse the sentence above back out of the body.
+        self.update(
+            &entry.meta.id,
+            EntryPatch {
+                links: Some(members_ids),
+                ..EntryPatch::default()
+            },
+        )
     }
 }
 
@@ -343,6 +483,30 @@ impl Vault {
 pub struct Maintenance {
     pub entries: usize,
     pub reflected: bool,
+    pub captures: crate::capture::WorkReport,
+}
+
+/// Join vector hits with the entries they name, so a related memory carries the
+/// reader-facing fields rather than only an ID and a number.
+fn related_from(entries: &[Entry], hits: Vec<SimilarityHit>) -> Vec<RelatedMemory> {
+    let by_id: HashMap<&str, &Entry> = entries
+        .iter()
+        .map(|entry| (entry.meta.id.as_str(), entry))
+        .collect();
+    hits.into_iter()
+        .filter_map(|hit| {
+            let entry = by_id.get(hit.id.as_str())?;
+            Some(RelatedMemory {
+                id: hit.id,
+                title: entry.meta.title.clone(),
+                path: entry.path.to_string_lossy().into_owned(),
+                tags: entry.meta.tags.clone(),
+                confidence: entry.meta.effective_confidence(),
+                similarity: hit.similarity,
+                shared_terms: hit.shared_terms,
+            })
+        })
+        .collect()
 }
 
 fn reflection_target(period: &str, now: chrono::DateTime<Utc>) -> Result<(&'static str, String)> {
@@ -364,11 +528,10 @@ fn write_if_missing(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-const DEFAULT_CONFIG: &str = "version: 1\nvault:\n  name: Relic Vault\n  default_confidence: 0.7\n  default_decay_rate: 0.05\nsync:\n  mode: manual\n  remotes: []\nevolution:\n  fading_threshold: 0.3\n";
+const DEFAULT_CONFIG: &str = "version: 1\nvault:\n  name: Relic Vault\n  default_confidence: 0.7\n  default_decay_rate: 0.05\nsync:\n  mode: manual\n  remotes: []\nevolution:\n  fading_threshold: 0.3\ngraph:\n  dimensions: 8192\n  semantic_top_k: 8\n  semantic_min_similarity: 0.08\n  tag_min_jaccard: 0.34\n  corroborate_min_similarity: 0.15\n  max_edges_per_node: 24\n";
 const TAXONOMY: &str = "# Taxonomy\n\nEdit this file to define your own knowledge domains and tag conventions.\n\n- ai-engineering\n- career\n- projects\n- personal\n";
 const AGENTS: &str = "# Relic Vault instructions\n\nThis repository is a local-first knowledge vault. Knowledge lives in Markdown files with YAML front matter.\n\n- Search before creating to avoid duplicates.\n- Preserve entry IDs and version history.\n- Record sources and confidence honestly.\n- Supersede obsolete knowledge instead of deleting it.\n- Never commit `.relic/index.sqlite`, embeddings, or state files.\n";
-const VAULT_GITIGNORE: &str =
-    ".relic/index.sqlite*\n.relic/state.json\n.relic/embeddings/\n.DS_Store\n";
+const VAULT_GITIGNORE: &str = ".relic/index.sqlite*\n.relic/state.json\n.relic/queue/\n.relic/automation/\n.relic/embeddings/\n.relic/graph.json\n.DS_Store\n";
 const SCHEMA: &str = r#"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Relic knowledge entry",

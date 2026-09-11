@@ -450,6 +450,47 @@ fn call_tool(vault: &Vault, params: &Value, default_source_agent: &str) -> Resul
         .cloned()
         .unwrap_or_else(|| json!({}));
     let result = match name {
+        "relic_capture" => {
+            let mut input: crate::capture::CaptureInput = serde_json::from_value(arguments)?;
+            if input.source_agent.is_empty() {
+                input.source_agent = default_source_agent.into();
+            }
+            json!({"item": crate::capture::capture(vault, input)?})
+        }
+        "relic_list_captures" => {
+            json!({"items": crate::capture::list(vault)?})
+        }
+        "relic_get_capture" => {
+            let id = uuid::Uuid::parse_str(required_string(&arguments, "capture_id")?)?;
+            let (source, item) = crate::capture::get(vault, id)?;
+            json!({"source": source, "item": item})
+        }
+        "relic_process_captures" => {
+            let limit = arguments
+                .get("limit")
+                .map(|v| v.as_u64().context("limit must be an integer"))
+                .transpose()?
+                .unwrap_or(100);
+            let report = match optional_string(&arguments, "capture_id")? {
+                Some(id) => crate::capture::work_one(vault, uuid::Uuid::parse_str(&id)?)?,
+                None => crate::capture::work(vault, usize::try_from(limit)?)?,
+            };
+            json!({"report": report})
+        }
+        "relic_review_capture" => {
+            let id = uuid::Uuid::parse_str(required_string(&arguments, "capture_id")?)?;
+            let review =
+                serde_json::from_value(arguments.get("review").context("missing review")?.clone())?;
+            json!({"item": crate::capture::review(vault, id, review)?})
+        }
+        "relic_redistill_capture" => {
+            let id = uuid::Uuid::parse_str(required_string(&arguments, "capture_id")?)?;
+            json!({"item": crate::capture::redistill(vault, id)?})
+        }
+        "relic_retry_capture" => {
+            let id = uuid::Uuid::parse_str(required_string(&arguments, "capture_id")?)?;
+            json!({"item": crate::capture::retry(vault, id)?})
+        }
         "relic_search" => {
             let query = required_string(&arguments, "query")?;
             let top_k = arguments
@@ -457,7 +498,83 @@ fn call_tool(vault: &Vault, params: &Value, default_source_agent: &str) -> Resul
                 .and_then(Value::as_u64)
                 .unwrap_or(10)
                 .clamp(1, 100) as usize;
-            json!({ "results": vault.search(query, top_k)? })
+            // Keyword stays the default so an existing client's results do not
+            // change underneath it; hybrid is the mode to ask for when the
+            // caller wants recall across wording.
+            let mode = match optional_string(&arguments, "mode")? {
+                Some(value) => crate::search::Mode::parse(&value)?,
+                None => crate::search::Mode::Keyword,
+            };
+            json!({ "mode": mode.as_str(), "results": vault.hybrid_search(query, top_k, mode)? })
+        }
+        "relic_find_similar" => {
+            let top_k = arguments
+                .get("top_k")
+                .and_then(Value::as_u64)
+                .unwrap_or(10)
+                .clamp(1, 100) as usize;
+            let minimum = arguments
+                .get("min_similarity")
+                .and_then(Value::as_f64)
+                .unwrap_or(
+                    vault
+                        .config()
+                        .map(|config| config.graph.semantic_min_similarity)
+                        .unwrap_or(0.08),
+                );
+            match optional_string(&arguments, "entry_id")? {
+                Some(entry_id) => {
+                    let entry = vault.get(&entry_id)?;
+                    json!({
+                        "entry_id": entry.meta.id,
+                        "title": entry.meta.title,
+                        "results": vault.similar(&entry.meta.id, top_k, minimum)?,
+                    })
+                }
+                None => {
+                    let text = required_string(&arguments, "text")?;
+                    json!({ "text": text, "results": vault.semantic_queries(text, top_k)? })
+                }
+            }
+        }
+        "relic_graph_neighbors" => {
+            let entry_id = required_string(&arguments, "entry_id")?;
+            let depth = arguments
+                .get("depth")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .clamp(1, 4) as usize;
+            let minimum = arguments
+                .get("min_weight")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let kinds = crate::graph::parse_kinds(&string_array(&arguments, "kinds")?)?;
+            let hits = vault
+                .graph()?
+                .neighborhood(entry_id, depth, minimum, kinds.as_deref())?;
+            json!({ "entry_id": entry_id, "depth": depth, "neighbors": hits })
+        }
+        "relic_graph_path" => {
+            let from = required_string(&arguments, "from_entry_id")?;
+            let to = required_string(&arguments, "to_entry_id")?;
+            let minimum = arguments
+                .get("min_weight")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let path = vault.graph()?.path(from, to, minimum)?;
+            json!({ "from": from, "to": to, "path": path })
+        }
+        "relic_graph_stats" => {
+            let minimum = arguments
+                .get("min_weight")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            json!({ "stats": vault.graph()?.stats(minimum) })
+        }
+        "relic_explain_relation" => {
+            let from = required_string(&arguments, "from_entry_id")?;
+            let to = required_string(&arguments, "to_entry_id")?;
+            json!({ "from": from, "to": to, "relations": vault.graph()?.explain(from, to) })
         }
         "relic_get_entry" => {
             json!({ "entry": vault.get(required_string(&arguments, "entry_id")?)? })
@@ -619,8 +736,8 @@ fn tools() -> Vec<Value> {
     vec![
         tool(
             "relic_search",
-            "Search the local knowledge vault. Search before creating entries.",
-            json!({"type":"object","properties":{"query":{"type":"string"},"top_k":{"type":"integer","minimum":1,"maximum":100,"default":10}},"required":["query"],"additionalProperties":false}),
+            "Search the local knowledge vault. Search before creating entries. mode=keyword is literal and precise; mode=semantic ranks by vector similarity and also finds memories phrased differently, including Chinese; mode=hybrid fuses both rankings.",
+            json!({"type":"object","properties":{"query":{"type":"string"},"top_k":{"type":"integer","minimum":1,"maximum":100,"default":10},"mode":{"enum":["keyword","semantic","hybrid"],"default":"keyword"}},"required":["query"],"additionalProperties":false}),
             true,
             false,
             true,
@@ -677,6 +794,116 @@ fn tools() -> Vec<Value> {
             "relic_get_stats",
             "Get local vault health and confidence statistics.",
             json!({"type":"object","properties":{},"additionalProperties":false}),
+            true,
+            false,
+            true,
+        ),
+        tool(
+            "relic_capture",
+            "Durably capture a structured experience for review. Reuse the same event_id, project, session_id and source_agent on retry. Submit no secrets or raw logs. This does not publish knowledge.",
+            json!({"type":"object","properties":{
+                "event_id":{"type":"string"},"project":{"type":"string"},"session_id":{"type":"string"},
+                "source_agent":{"type":"string"},"title":{"type":"string"},"context":{"type":"string"},
+                "action":{"type":"string"},"outcome":{"type":"string"},
+                "evidence":{"type":"array","items":{"type":"string"}},"tags":{"type":"array","items":{"type":"string"}}
+            },"required":["event_id","project","session_id","title","context","action","outcome"],"additionalProperties":false}),
+            false,
+            false,
+            true,
+        ),
+        tool(
+            "relic_list_captures",
+            "List local capture states and candidate drafts; candidates are excluded from knowledge search.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+            true,
+            false,
+            true,
+        ),
+        tool(
+            "relic_get_capture",
+            "Read a captured source event and its current review draft.",
+            json!({"type":"object","properties":{"capture_id":{"type":"string","format":"uuid"}},"required":["capture_id"],"additionalProperties":false}),
+            true,
+            false,
+            true,
+        ),
+        tool(
+            "relic_process_captures",
+            "Prepare drafts using the locally configured distiller (templates by default) and recover interrupted work. Evidence is not automatically verified.",
+            json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":1000,"default":100},"capture_id":{"type":"string","format":"uuid"}},"additionalProperties":false}),
+            false,
+            false,
+            false,
+        ),
+        tool(
+            "relic_review_capture",
+            "Review a candidate after checking its evidence and related entries. Accept publishes a new Markdown entry; reject preserves the source. Supply final knowledge to replace the draft. Retry with the same review after an error.",
+            json!({"type":"object","properties":{
+                "capture_id":{"type":"string","format":"uuid"},
+                "review":{"type":"object","properties":{
+                    "decision":{"enum":["accept","reject"]},"reason":{"type":"string"},
+                    "knowledge":{"type":"object","properties":{
+                        "title":{"type":"string"},"content":{"type":"string"},"kind":{"enum":["knowledge","lesson","decision","pattern"]},
+                        "confidence":{"type":"number","minimum":0,"maximum":1},"tags":{"type":"array","items":{"type":"string"}}
+                    },"required":["title","content","kind","confidence","tags"],"additionalProperties":false}
+                },"required":["decision","reason"],"additionalProperties":false}
+            },"required":["capture_id","review"],"additionalProperties":false}),
+            false,
+            false,
+            true,
+        ),
+        tool(
+            "relic_retry_capture",
+            "Requeue a failed capture after addressing the error; repeated retry before processing is safe.",
+            json!({"type":"object","properties":{"capture_id":{"type":"string","format":"uuid"}},"required":["capture_id"],"additionalProperties":false}),
+            false,
+            false,
+            true,
+        ),
+        tool(
+            "relic_redistill_capture",
+            "Requeue an unreviewed candidate using the current locally configured distiller. Run relic_process_captures afterwards. Accepted entries and recorded reviews cannot be reprocessed.",
+            json!({"type":"object","properties":{"capture_id":{"type":"string","format":"uuid"}},"required":["capture_id"],"additionalProperties":false}),
+            false,
+            false,
+            false,
+        ),
+        tool(
+            "relic_find_similar",
+            "Find memories closest to a memory or to free text in the vault's vector space. Returns cosine similarity and the vocabulary that carried it, so the relation can be judged rather than trusted. Use this to surface related knowledge that shares no keywords.",
+            json!({"type":"object","properties":{"entry_id":{"type":"string"},"text":{"type":"string"},"top_k":{"type":"integer","minimum":1,"maximum":100,"default":10},"min_similarity":{"type":"number","minimum":0,"maximum":1}},"additionalProperties":false}),
+            true,
+            false,
+            true,
+        ),
+        tool(
+            "relic_graph_neighbors",
+            "List memories connected to one memory by typed, evidence-carrying relations: explicit links, version history, shared subjects, vector proximity, contradictions, and corroborations. Filter by relation kind, hop depth, or minimum relation weight to see the backbone instead of the full network.",
+            json!({"type":"object","properties":{"entry_id":{"type":"string"},"depth":{"type":"integer","minimum":1,"maximum":4,"default":1},"min_weight":{"type":"number","minimum":0,"maximum":1,"default":0},"kinds":{"type":"array","items":{"enum":["link","supersedes","tag","semantic","contradicts","corroborates"]}}},"required":["entry_id"],"additionalProperties":false}),
+            true,
+            false,
+            true,
+        ),
+        tool(
+            "relic_graph_path",
+            "Find the strongest chain of relations between two memories. The route maximises its weakest hop, so the reported bottleneck is the confidence of the whole chain. Use this to explain how two pieces of knowledge are connected.",
+            json!({"type":"object","properties":{"from_entry_id":{"type":"string"},"to_entry_id":{"type":"string"},"min_weight":{"type":"number","minimum":0,"maximum":1,"default":0}},"required":["from_entry_id","to_entry_id"],"additionalProperties":false}),
+            true,
+            false,
+            true,
+        ),
+        tool(
+            "relic_explain_relation",
+            "Explain every relation recorded between two memories, with the kind, the derivation (explicit, statistical, or logical), the weight, and the concrete evidence. Use this before acting on a relation that was inferred rather than declared.",
+            json!({"type":"object","properties":{"from_entry_id":{"type":"string"},"to_entry_id":{"type":"string"}},"required":["from_entry_id","to_entry_id"],"additionalProperties":false}),
+            true,
+            false,
+            true,
+        ),
+        tool(
+            "relic_graph_stats",
+            "Summarise the relation network: counts by relation kind and derivation, connected components, hub memories, isolated memories, and any bounded derivation. Use this to judge whether the vault's knowledge is connected.",
+            json!({"type":"object","properties":{"min_weight":{"type":"number","minimum":0,"maximum":1,"default":0}},"additionalProperties":false}),
             true,
             false,
             true,
