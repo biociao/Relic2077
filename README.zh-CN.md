@@ -305,6 +305,51 @@ DeepSeek Harness。
 `relic_supersede_entry`、`relic_create_reflection` 和 `relic_get_stats`。
 读写操作均带有 MCP 工具注解，因此兼容客户端可以应用适当的审批策略。
 
+## 与 Git 同步
+
+知识库本身就是一个普通的 Git 仓库。`relic sync` 用一步确定性的操作完成已检出知识库的同步：
+
+```bash
+relic sync --remote origin --branch main --message "sync memory"
+```
+
+`sync` 会先确认目录是一个 Git 仓库（必要时初始化仓库并创建首次提交），提交本地 Markdown 变更，拉取并合并远端分支，然后推送。远端名默认是 `origin`，分支默认是当前检出的分支，因此最常见的情况就是直接运行 `relic sync`。
+
+合并发生冲突时，Relic 会确定性地解决：远端（theirs）版本成为正式文件，本地（ours）版本保存在 `.relic/conflicts/<timestamp>/` 下——知识绝不会被悄悄丢弃。无论合并结果如何，每次合并后都会重建搜索索引。
+
+在 `.relic/config.yaml` 中一次性配置默认远端：
+
+```yaml
+sync:
+  mode: manual
+  remotes:
+    - name: origin
+      url: git@github.com:you/relic-vault.git
+```
+
+轻量、可丢弃的 SQLite 索引（`.relic/index.sqlite`）与 embedding 已列入 gitignore，因此被纳入版本管理的只有 Markdown 中的知识。
+
+## 反思与分析
+
+反思已不再是静态模板。`relic reflect` 会把知识库综合成每日、每周或每月草稿，其中列出近期知识、检测到的矛盾，以及可供提取的模式候选。
+
+`relic analyze` 只报告这两类信号，不写入任何内容：
+
+```bash
+relic analyze
+```
+
+- **矛盾检测**：把共享同一主题标签、但主张极性相反（肯定与否定用语，例如 "works" 与 "fails"）的活跃条目两两配对。它只把这一对标记出来供复核，不判断哪一条正确。
+- **模式提取**：按主题标签对活跃条目分组，当某个分组达到最小规模时给出可复用模式的候选。`--write-patterns` 会把每个候选落成一条 `pattern` 条目。
+
+反思也可以自动触发，而不必按需运行：
+
+```bash
+relic reflect --period daily --auto --min-entries 5
+```
+
+仅当该周期还没有反思、且知识库中的条目数不少于 `--min-entries`（默认 5）时，`--auto` 才会创建反思。
+
 ## 设计原则
 
 1. **纯文本掌握事实。** 数据库可以随时删除并重新构建。
@@ -347,6 +392,30 @@ semantic      0.291  statistical
 **Agent 也能遍历：** 五个只读 MCP 工具（`relic_find_similar`、`relic_graph_neighbors`、`relic_graph_path`、`relic_explain_relation`、`relic_graph_stats`）均带 `readOnlyHint`——遍历关系永远不会改动知识库。
 
 架构与取舍详见[知识图谱设计说明](docs/knowledge-graph.md)。
+
+## 配置与守护进程
+
+`.relic/config.yaml` 是知识库稳定且经过校验的契约。`relic doctor` 会检查 Schema 版本以及每个字段的约束（置信度与衰减值有界、`sync.mode` 取值受支持、同步远端格式正确且互不重复）。未知字段会被忽略，因此更新的配置不会弄坏旧版二进制。
+
+一次性配置默认同步远端后，`relic sync` 就无需任何参数——它会提交本地变更、拉取并合并第一个已配置的远端，然后推送：
+
+```yaml
+sync:
+  mode: manual
+  remotes:
+    - name: origin
+      url: git@github.com:you/relic-vault.git
+```
+
+省略 `--remote` 时，若第一个已配置的远端尚未登记，Relic 会先添加它再同步。这就是多设备工作流：让每台设备指向同一个知识库、配置同一个远端，然后运行 `relic sync`。
+
+`relic watch` 作为维护守护进程让知识库保持常新——它重建搜索索引，并在触发条件满足时自动生成反思：
+
+```bash
+relic watch                 # loop every 60 seconds
+relic watch --once          # run a single maintenance pass and exit
+relic watch --interval 120 --reflect-period daily --min-entries 5
+```
 
 ## 目录结构
 
