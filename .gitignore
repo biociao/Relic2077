@@ -4,3 +4,6 @@
 /.relic/embeddings/
 .DS_Store
 /.dsh/
+/.codex/
+__pycache__/
+*.py[cod]
