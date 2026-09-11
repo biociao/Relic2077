@@ -41,17 +41,23 @@ This repository contains the CLI, MCP integration, and a local browser UI:
 - organize knowledge, patterns, decisions, sources, attachments, and reflections;
 - generate daily, weekly, or monthly reflection drafts;
 - rebuild the entire SQLite FTS5 index from Markdown at any time;
-- validate vault health with `relic doctor`.
+- validate vault health with `relic doctor`;
 - build a knowledge graph over your memories — typed, evidence-carrying
   relations plus a local vector space, both derived from Markdown and both
   disposable;
-- expose the vault to Codex, Claude, Cursor, and other agents through a local
-  STDIO MCP server;
+- capture durable experiences into a review queue, with an optional local
+  distillation backend and an idempotent import of memories Codex already
+  distilled;
+- retrieve relevant memories before a task and capture the finished turn
+  through Codex hooks or the native DeepSeek Harness adapter;
+- expose the vault to Codex, Claude, Cursor, Gemini CLI, VS Code, and other
+  agents through a local STDIO MCP server or Streamable HTTP;
+- commit, pull, and push the vault with `relic sync`;
 - inspect memories, edit entries and configuration, and check vault health in
   a browser.
 
-Git synchronization, remote MCP transport, and specialized agent adapters remain
-future milestones. The storage format is already compatible with them.
+Every milestone up to 1.1 is implemented — see [Roadmap](#roadmap). The storage
+format stays compatible with the milestones that follow.
 
 
 ## Install
@@ -666,6 +672,7 @@ AGENTS.md         instructions for any agent entering the vault
 - **0.5 (complete):** reflection synthesis with automatic `--auto` triggers, contradiction detection, and pattern extraction
 - **1.0 (complete):** config schema validation (`relic doctor`), `relic watch` maintenance daemon, and config-driven sync remotes for multi-device workflow
 - **1.1 (complete):** the knowledge graph — a deterministic local vector layer, typed evidence-carrying relations, hybrid retrieval, graph traversal over MCP, and a relation view in the dashboard
+- **1.2 (complete):** the durable experience inbox — capture and review queue, Codex and DSH lifecycle hooks, an independent daemon with optional automatic sync, local model-command distillation, and import of memories Codex already distilled
 
 ## Durable experience inbox
 
